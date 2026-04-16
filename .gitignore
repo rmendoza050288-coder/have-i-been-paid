@@ -1,0 +1,25 @@
+# Have I Been Paid?
+
+# Environment — never commit real credentials
+.env.local
+
+# Dependencies & build output
+node_modules/
+.next/
+
+# Google OAuth client secret files
+client_secret*.json
+
+# Personal data files
+*.xml
+~$*.xml
+*.pdf
+context_*.json
+context_*.md
+
+# macOS
+.DS_Store
+Thumbs.db
+
+# Screenshots / local assets
+Screenshot*.png
