@@ -7,8 +7,11 @@
 node_modules/
 .next/
 
-# Google OAuth client secret files
+# Google OAuth client secret files and Service Account keys
 client_secret*.json
+service-account*.json
+*-service-account.json
+silicon-axle*.json
 
 # Personal data files
 *.xml
@@ -16,6 +19,7 @@ client_secret*.json
 *.pdf
 context_*.json
 context_*.md
+data.json
 
 # macOS
 .DS_Store

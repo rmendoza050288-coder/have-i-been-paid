@@ -9,8 +9,6 @@ export default function RootLayout({ children }) {
   return (
     <html lang="en">
       <head>
-        {/* Google Identity Services — required for Drive login */}
-        <script src="https://accounts.google.com/gsi/client" async defer></script>
         {/* Cursive signature fonts */}
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />

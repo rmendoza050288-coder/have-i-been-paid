@@ -414,14 +414,23 @@ export default function App() {
   const [gasLogs, setGasLogs] = useState([]);
   const [newGasLog, setNewGasLog] = useState({ date: new Date().toISOString().split("T")[0], vehicle: "", station: "", pricePerGallon: "", amount: "", notes: "" });
 
+
+
   // Local blob URL cache: itemId → { url, type }
   const blobCache = useRef(new Map());
   const hasLoadedRef = useRef(false);
   useEffect(() => () => blobCache.current.forEach(v => URL.revokeObjectURL(v.url)), []);
 
-  // Drive connection state (optional — app works offline without it)
+  // Drive connection state (service account configured and reachable)
   const [driveConnected, setDriveConnected] = useState(false);
-  const [driveName, setDriveName] = useState("");
+  const [driveEmail, setDriveEmail] = useState("");
+  const [showDriveSetup, setShowDriveSetup] = useState(false);
+  const [customFolderInput, setCustomFolderInput] = useState("");
+  const [savedCustomFolderId, setSavedCustomFolderId] = useState("");
+  const [relinkPreview, setRelinkPreview] = useState(null); // parsed JSON waiting for confirm
+  const [driveCheckStatus, setDriveCheckStatus] = useState("idle"); // idle | checking | ok | error
+  const [driveCheckError, setDriveCheckError] = useState("");
+  const relinkInputRef = useRef(null);
   const [lastSynced, setLastSynced] = useState("");
   const [isSyncing, setIsSyncing] = useState(false);
   const [yearFolderIds, setYearFolderIds] = useState({});
@@ -444,106 +453,85 @@ export default function App() {
       }
       const ls = localStorage.getItem("hibp_last_synced");
       if (ls) setLastSynced(ls);
+      const cf = localStorage.getItem("hibp_custom_folder_id");
+      if (cf) { setCustomFolderInput(cf); setSavedCustomFolderId(cf); }
     } catch {}
     hasLoadedRef.current = true;
-    // Silently restore Drive session if a token exists
-    const existingToken = localStorage.getItem("google_token");
-    if (existingToken) {
-      fetch(`https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${existingToken}`)
-        .then(r => r.json())
-        .then(info => {
-          if (!info.error) {
-            setDriveConnected(true);
-            setDriveName(info.email || "");
-            initDrive().catch(() => {});
-          } else {
-            localStorage.removeItem("google_token");
-          }
-        }).catch(() => {});
-    }
+    // Check if service account Drive is configured
+    fetch("/api/drive?action=ping")
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          setDriveConnected(true);
+          setDriveEmail(data.email || "");
+          setDriveCheckStatus("ok");
+          initDrive().catch(() => {});
+        }
+      }).catch(() => {});
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Track when Google Identity Services script has loaded
-  const [googleReady, setGoogleReady] = useState(false);
-  useEffect(() => {
-    if (window.google?.accounts?.oauth2) { setGoogleReady(true); return; }
-    const iv = setInterval(() => {
-      if (window.google?.accounts?.oauth2) { setGoogleReady(true); clearInterval(iv); }
-    }, 150);
-    return () => clearInterval(iv);
-  }, []);
-
-  // ── AUTH / DRIVE CONNECTION ──────────────────────────────────────────────────
-  const connectDrive = () => new Promise((resolve, reject) => {
-    if (!window.google?.accounts?.oauth2) {
-      alert("Google sign-in is still loading — please wait a moment and try again.");
-      return reject(new Error("GIS not loaded"));
-    }
+  // Re-usable ping → initDrive sequence (used by modal Verify button + Use Folder)
+  const checkDriveConnection = async () => {
+    setDriveCheckStatus("checking");
+    setDriveCheckError("");
     try {
-      window.google.accounts.oauth2.initTokenClient({
-        client_id: process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID,
-        scope: "https://www.googleapis.com/auth/drive.file",
-        callback: async (res) => {
-          if (res.error) { alert("Sign-in failed: " + res.error); return reject(new Error(res.error)); }
-          if (res.access_token) {
-            localStorage.setItem("google_token", res.access_token);
-            let name = "", email = "";
-            try {
-              const uRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", { headers: { Authorization: `Bearer ${res.access_token}` } });
-              const uData = await uRes.json();
-              name = uData.name || ""; email = uData.email || "";
-            } catch {}
-            setDriveConnected(true);
-            setDriveName(name || email);
-            setNewTimecard(p => ({ ...p, workerName: p.workerName || name, workerEmail: p.workerEmail || email }));
-            await initDrive();
-            resolve();
-          }
-        },
-      }).requestAccessToken();
-    } catch (err) {
-      alert("Could not open sign-in window — " + err.message + "\n\nIf a popup was blocked, allow popups for this site and try again.");
-      reject(err);
+      const data = await fetch("/api/drive?action=ping").then(r => r.json());
+      if (data.ok) {
+        setDriveConnected(true);
+        setDriveEmail(data.email || "");
+        setDriveCheckStatus("ok");
+        await initDrive();
+      } else {
+        setDriveConnected(false);
+        setDriveCheckStatus("error");
+        setDriveCheckError(
+          data.error === "not_configured"
+            ? "Service account not found. Make sure GOOGLE_SERVICE_ACCOUNT_JSON is set in .env.local and the app was restarted."
+            : "Credentials found but invalid. Check your service account JSON."
+        );
+      }
+    } catch {
+      setDriveConnected(false);
+      setDriveCheckStatus("error");
+      setDriveCheckError("Could not reach the server. Is the app running?");
     }
-  });
-
-  // keep handleLogin as alias so existing OCR call-sites still work
-  const handleLogin = connectDrive;
-
-  const disconnectDrive = () => {
-    localStorage.removeItem("google_token");
-    setDriveConnected(false);
-    setDriveName("");
-    setFolderId(null);
-    setDataFileId(null);
-    setYearFolderIds({});
-    setSyncStatus("Not synced");
   };
 
   // ── DRIVE HELPERS ───────────────────────────────────────────────────────────
-  const tok = () => localStorage.getItem("google_token");
-  const authHeader = () => ({ Authorization: `Bearer ${tok()}` });
-  const jsonHeaders = () => ({ ...authHeader(), "Content-Type": "application/json" });
+  // All Drive operations go through /api/drive (service account, server-side)
+  const drivePost = (body) =>
+    fetch("/api/drive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(r => r.json());
+
+  const fileToBase64 = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 
   // ── DRIVE INIT / SYNC ───────────────────────────────────────────────────────
   const initDrive = async () => {
     try {
-      const res = await fetch(
-        `https://www.googleapis.com/drive/v3/files?q=name='${FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
-        { headers: jsonHeaders() }
-      );
-      if (!res.ok) {
-        const e = await res.json();
-        throw new Error(e.error?.message || "Drive API error");
+      // If the user has shared their own Drive folder with the service account, use it directly
+      const customId = localStorage.getItem("hibp_custom_folder_id");
+      if (customId) {
+        setFolderId(customId);
+        await loadManifest(customId);
+        return;
       }
-      const data = await res.json();
+      // Otherwise find or create the app folder in the service account's Drive
+      const data = await drivePost({
+        action: "listFiles",
+        q: `name='${FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      });
+      if (data.error) throw new Error(data.error);
       let fId = data.files?.[0]?.id;
       if (!fId) {
-        const cr = await fetch("https://www.googleapis.com/drive/v3/files", {
-          method: "POST", headers: jsonHeaders(),
-          body: JSON.stringify({ name: FOLDER_NAME, mimeType: "application/vnd.google-apps.folder" }),
-        });
-        const cd = await cr.json();
+        const cd = await drivePost({ action: "createFolder", name: FOLDER_NAME });
         if (!cd.id) throw new Error("Could not create Drive folder: " + JSON.stringify(cd));
         fId = cd.id;
       }
@@ -556,18 +544,13 @@ export default function App() {
 
   const getOrCreateYearFolder = async (rootId, year) => {
     if (yearFolderIds[year]) return yearFolderIds[year];
-    const res = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=name='${year}' and mimeType='application/vnd.google-apps.folder' and '${rootId}' in parents and trashed=false`,
-      { headers: jsonHeaders() }
-    );
-    const data = await res.json();
+    const data = await drivePost({
+      action: "listFiles",
+      q: `name='${year}' and mimeType='application/vnd.google-apps.folder' and '${rootId}' in parents and trashed=false`,
+    });
     let yId = data.files?.[0]?.id;
     if (!yId) {
-      const cr = await fetch("https://www.googleapis.com/drive/v3/files", {
-        method: "POST", headers: jsonHeaders(),
-        body: JSON.stringify({ name: String(year), mimeType: "application/vnd.google-apps.folder", parents: [rootId] }),
-      });
-      const cd = await cr.json();
+      const cd = await drivePost({ action: "createFolder", name: String(year), parents: [rootId] });
       yId = cd.id;
     }
     setYearFolderIds(prev => ({ ...prev, [year]: yId }));
@@ -575,16 +558,12 @@ export default function App() {
   };
 
   const loadManifest = async (fId) => {
-    const res = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=name='data.json' and '${fId}' in parents and trashed=false`,
-      { headers: jsonHeaders() }
-    );
-    const data = await res.json();
-    if (data.files?.length > 0) {
-      const fileId = data.files[0].id;
+    const d = await drivePost({ action: "listFiles", q: `name='data.json' and '${fId}' in parents and trashed=false` });
+    if (d.files?.length > 0) {
+      const fileId = d.files[0].id;
       setDataFileId(fileId);
-      const fr = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, { headers: authHeader() });
-      const content = await fr.json();
+      const fr = await drivePost({ action: "readFile", fileId });
+      const content = fr.content;
       if (Array.isArray(content)) { setInvoices(content); }
       else { setInvoices(Array.isArray(content.invoices) ? content.invoices : []); setTimecards(Array.isArray(content.timecards) ? content.timecards : []); setJobs(Array.isArray(content.jobs) ? content.jobs : []); setPurchases(Array.isArray(content.purchases) ? content.purchases : []); setClassifications(Array.isArray(content.classifications) ? content.classifications : []); setMileageLogs(Array.isArray(content.mileageLogs) ? content.mileageLogs : []); setVehicleExpenses(Array.isArray(content.vehicleExpenses) ? content.vehicleExpenses : []); setVehicles(Array.isArray(content.vehicles) ? content.vehicles : []); setGasLogs(Array.isArray(content.gasLogs) ? content.gasLogs : []); }
     }
@@ -603,32 +582,64 @@ export default function App() {
     try { localStorage.setItem("hibp_data", JSON.stringify(data)); } catch {}
   }, [invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs]);
 
+  // ── EXPORT / RELINK ──────────────────────────────────────────────────────────
+  const exportData = () => {
+    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `hibp-backup-${new Date().toISOString().split("T")[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleRelinkFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const d = JSON.parse(reader.result);
+        // Accept either the full object or a legacy array of invoices
+        if (Array.isArray(d)) { setRelinkPreview({ invoices: d }); }
+        else if (d && typeof d === "object") { setRelinkPreview(d); }
+        else { alert("Unrecognized file format."); }
+      } catch { alert("Could not parse the file. Make sure it is a valid HIBP backup JSON."); }
+    };
+    reader.readAsText(file);
+  };
+
+  const confirmRelink = () => {
+    const d = relinkPreview;
+    if (!d) return;
+    if (Array.isArray(d.invoices)) setInvoices(d.invoices);
+    if (Array.isArray(d.timecards)) setTimecards(d.timecards);
+    if (Array.isArray(d.jobs)) setJobs(d.jobs);
+    if (Array.isArray(d.purchases)) setPurchases(d.purchases);
+    if (Array.isArray(d.classifications)) setClassifications(d.classifications);
+    if (Array.isArray(d.mileageLogs)) setMileageLogs(d.mileageLogs);
+    if (Array.isArray(d.vehicleExpenses)) setVehicleExpenses(d.vehicleExpenses);
+    if (Array.isArray(d.vehicles)) setVehicles(d.vehicles);
+    if (Array.isArray(d.gasLogs)) setGasLogs(d.gasLogs);
+    setRelinkPreview(null);
+  };
+
   // ── SYNC TO DRIVE (manual) ───────────────────────────────────────────────────
   const syncToDrive = async () => {
-    if (!driveConnected) {
-      try { await connectDrive(); } catch { return; }
-    }
     setIsSyncing(true);
     setSyncStatus("Syncing...");
     try {
       let rFolderId = folderId;
       if (!rFolderId) { await initDrive(); rFolderId = folderId; }
       const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs };
-      const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
       // Root data.json
       if (dataFileId) {
-        await fetch(`https://www.googleapis.com/upload/drive/v3/files/${dataFileId}?uploadType=media`, {
-          method: "PATCH", headers: { ...authHeader(), "Content-Type": "application/json" }, body: blob,
-        });
+        await drivePost({ action: "updateFile", fileId: dataFileId, content: data });
       } else {
-        const m = await (await fetch("https://www.googleapis.com/drive/v3/files", {
-          method: "POST", headers: jsonHeaders(),
-          body: JSON.stringify({ name: "data.json", parents: [rFolderId] }),
-        })).json();
+        const m = await drivePost({ action: "createFile", name: "data.json", parents: [rFolderId], content: data });
         setDataFileId(m.id);
-        await fetch(`https://www.googleapis.com/upload/drive/v3/files/${m.id}?uploadType=media`, {
-          method: "PATCH", headers: { ...authHeader(), "Content-Type": "application/json" }, body: blob,
-        });
       }
       // Per-year data snapshots in subfolders
       const getYearLocal = (dateStr) => { const d = new Date(dateStr); return isNaN(d) ? null : d.getFullYear(); };
@@ -654,22 +665,13 @@ export default function App() {
           vehicles,
           syncedAt: new Date().toISOString(),
         };
-        const yBlob = new Blob([JSON.stringify(yearData)], { type: "application/json" });
         const yFileKey = `hibp_yfid_${year}`;
         const existingYFId = localStorage.getItem(yFileKey);
         if (existingYFId) {
-          await fetch(`https://www.googleapis.com/upload/drive/v3/files/${existingYFId}?uploadType=media`, {
-            method: "PATCH", headers: { ...authHeader(), "Content-Type": "application/json" }, body: yBlob,
-          });
+          await drivePost({ action: "updateFile", fileId: existingYFId, content: yearData });
         } else {
-          const ym = await (await fetch("https://www.googleapis.com/drive/v3/files", {
-            method: "POST", headers: jsonHeaders(),
-            body: JSON.stringify({ name: `data_${year}.json`, parents: [yFId] }),
-          })).json();
+          const ym = await drivePost({ action: "createFile", name: `data_${year}.json`, parents: [yFId], content: yearData });
           localStorage.setItem(yFileKey, ym.id);
-          await fetch(`https://www.googleapis.com/upload/drive/v3/files/${ym.id}?uploadType=media`, {
-            method: "PATCH", headers: { ...authHeader(), "Content-Type": "application/json" }, body: yBlob,
-          });
         }
       }
       const now = new Date().toLocaleString();
@@ -704,17 +706,11 @@ export default function App() {
   };
 
   const uploadReceiptForExpense = async (expenseId, file) => {
-    if (!folderId) { alert("Not connected to Drive."); return; }
+    if (!folderId) { alert("Drive not configured. Set up Drive to save receipts."); return; }
     try {
-      const metaRes = await fetch("https://www.googleapis.com/drive/v3/files", {
-        method: "POST", headers: jsonHeaders(),
-        body: JSON.stringify({ name: `receipt_${file.name}`, parents: [folderId] }),
-      });
-      const meta = await metaRes.json();
-      await fetch(`https://www.googleapis.com/upload/drive/v3/files/${meta.id}?uploadType=media`, {
-        method: "PATCH", headers: { ...authHeader(), "Content-Type": file.type }, body: file,
-      });
-      setVehicleExpenses(prev => prev.map(v => v.id === expenseId ? { ...v, receiptFileId: meta.id } : v));
+      const fileBase64 = await fileToBase64(file);
+      const res = await drivePost({ action: "uploadBinary", fileName: `receipt_${file.name}`, fileBase64, mimeType: file.type, parents: [folderId] });
+      if (res.id) setVehicleExpenses(prev => prev.map(v => v.id === expenseId ? { ...v, receiptFileId: res.id } : v));
     } catch (err) { alert("Receipt upload failed: " + err.message); }
   };
 
@@ -725,17 +721,11 @@ export default function App() {
   };
 
   const uploadReceiptForGas = async (gasId, file) => {
-    if (!folderId) { alert("Not connected to Drive."); return; }
+    if (!folderId) { alert("Drive not configured. Set up Drive to save receipts."); return; }
     try {
-      const metaRes = await fetch("https://www.googleapis.com/drive/v3/files", {
-        method: "POST", headers: jsonHeaders(),
-        body: JSON.stringify({ name: `gas_receipt_${file.name}`, parents: [folderId] }),
-      });
-      const meta = await metaRes.json();
-      await fetch(`https://www.googleapis.com/upload/drive/v3/files/${meta.id}?uploadType=media`, {
-        method: "PATCH", headers: { ...authHeader(), "Content-Type": file.type }, body: file,
-      });
-      setGasLogs(prev => prev.map(g => g.id === gasId ? { ...g, receiptFileId: meta.id } : g));
+      const fileBase64 = await fileToBase64(file);
+      const res = await drivePost({ action: "uploadBinary", fileName: `gas_receipt_${file.name}`, fileBase64, mimeType: file.type, parents: [folderId] });
+      if (res.id) setGasLogs(prev => prev.map(g => g.id === gasId ? { ...g, receiptFileId: res.id } : g));
     } catch (err) { alert("Receipt upload failed: " + err.message); }
   };
 
@@ -756,36 +746,17 @@ export default function App() {
   };
 
   // ── DRIVE OCR ───────────────────────────────────────────────────────────────
+  // Shared OCR helper — returns raw text from Drive's built-in OCR engine
+  const performOCR = async (file) => {
+    const fileBase64 = await fileToBase64(file);
+    const res = await drivePost({ action: "ocrFile", fileBase64, mimeType: file.type, parents: folderId ? [folderId] : [] });
+    if (res.error) throw new Error(res.error);
+    return res.text || "";
+  };
+
   const extractWithDriveOCR = async (file) => {
-    const base64 = await new Promise(r => {
-      const reader = new FileReader();
-      reader.onload = () => r(reader.result.split(",")[1]);
-      reader.readAsDataURL(file);
-    });
-    const boundary = "ocr_" + Date.now();
-    const meta = JSON.stringify({ name: `_ocr_${Date.now()}`, mimeType: "application/vnd.google-apps.document", parents: [folderId] });
-    const body = [`--${boundary}`, "Content-Type: application/json; charset=UTF-8", "", meta,
-      `--${boundary}`, `Content-Type: ${file.type}`, "Content-Transfer-Encoding: base64", "", base64, `--${boundary}--`].join("\r\n");
-
-    const uploadRes = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
-      method: "POST",
-      headers: { ...authHeader(), "Content-Type": `multipart/related; boundary="${boundary}"` },
-      body,
-    });
-    if (!uploadRes.ok) {
-      const err = await uploadRes.json().catch(() => ({}));
-      throw new Error("Drive OCR upload failed: " + (err.error?.message || uploadRes.status));
-    }
-    const ocrDoc = await uploadRes.json();
-    if (!ocrDoc.id) throw new Error("No OCR doc ID returned");
-
-    const textRes = await fetch(`https://www.googleapis.com/drive/v3/files/${ocrDoc.id}/export?mimeType=text/plain`, { headers: authHeader() });
-    const text = await textRes.text();
+    const text = await performOCR(file);
     console.log("=== RAW OCR TEXT ===\n", text, "\n===================");
-
-    // Delete temp doc (fire and forget)
-    fetch(`https://www.googleapis.com/drive/v3/files/${ocrDoc.id}`, { method: "DELETE", headers: authHeader() }).catch(() => {});
-
     return parseInvoiceText(text);
   };
 
@@ -794,7 +765,6 @@ export default function App() {
     const files = Array.from(e.target.files);
     if (!files.length) return;
     e.target.value = "";
-    if (!folderId) { alert("Not connected to Drive yet. Please log out and reconnect."); return; }
 
     setIsUploading(true);
     setUploadError("");
@@ -806,41 +776,32 @@ export default function App() {
       const blobUrl = URL.createObjectURL(file);
       blobCache.current.set(itemId, { url: blobUrl, type: file.type });
 
-      // 2. Upload original file to Drive
+      // 2. Upload original file to Drive (if configured)
       setUploadStatus(`Uploading ${file.name}...`);
       let driveFileId = null;
-      try {
-        const metaRes = await fetch("https://www.googleapis.com/drive/v3/files", {
-          method: "POST", headers: jsonHeaders(),
-          body: JSON.stringify({ name: file.name, parents: [folderId] }),
-        });
-        if (!metaRes.ok) {
-          const err = await metaRes.json().catch(() => ({}));
-          throw new Error("Upload failed: " + (err.error?.message || metaRes.status));
+      if (folderId) {
+        try {
+          const fileBase64 = await fileToBase64(file);
+          const res = await drivePost({ action: "uploadBinary", fileName: file.name, fileBase64, mimeType: file.type, parents: [folderId] });
+          if (res.id) driveFileId = res.id;
+          else throw new Error(res.error || "Upload returned no file ID");
+        } catch (err) {
+          console.error("Drive upload error:", err);
+          setUploadError(err.message + " — Check your service account credentials in .env.local");
         }
-        const metaData = await metaRes.json();
-        driveFileId = metaData.id;
-
-        await fetch(`https://www.googleapis.com/upload/drive/v3/files/${driveFileId}?uploadType=media`, {
-          method: "PATCH",
-          headers: { ...authHeader(), "Content-Type": file.type },
-          body: file,
-        });
-      } catch (err) {
-        console.error("Drive upload error:", err);
-        setUploadError(err.message + " — Make sure Google Drive API is enabled at console.cloud.google.com");
       }
 
-      // 3. OCR extraction
+      // 3. OCR extraction (if Drive is configured)
       setUploadStatus(`Reading ${file.name}...`);
       let extracted = { company: "", amount: 0, date: new Date().toISOString().split("T")[0], invoiceNumber: "" };
-      try {
-        const result = await extractWithDriveOCR(file);
-        if (result) extracted = result;
-      } catch (err) {
-        console.warn("OCR failed:", err.message);
-        // Fall back to filename as company
-        extracted.company = file.name.replace(/\.[^.]+$/, "").replace(/[_\-]+/g, " ");
+      if (driveConnected) {
+        try {
+          const result = await extractWithDriveOCR(file);
+          if (result) extracted = result;
+        } catch (err) {
+          console.warn("OCR failed:", err.message);
+          extracted.company = file.name.replace(/\.[^.]+$/, "").replace(/[_\-]+/g, " ");
+        }
       }
 
       // Fill any still-empty company with filename
@@ -878,51 +839,32 @@ export default function App() {
 
   // ── PAYSTUB UPLOAD ───────────────────────────────────────────────────────────
   const handlePaystubUpload = async (invoiceId, file) => {
-    if (!file || !folderId) return;
+    if (!file) return;
     setPaystubUploading(invoiceId);
 
     // Store blob for immediate local preview
     const blobUrl = URL.createObjectURL(file);
     blobCache.current.set("paystub_" + invoiceId, { url: blobUrl, type: file.type });
 
-    // Upload to Drive
+    // Upload to Drive (if configured)
     let driveFileId = null;
-    try {
-      const metaRes = await fetch("https://www.googleapis.com/drive/v3/files", {
-        method: "POST", headers: jsonHeaders(),
-        body: JSON.stringify({ name: "paystub_" + file.name, parents: [folderId] }),
-      });
-      if (metaRes.ok) {
-        const metaData = await metaRes.json();
-        driveFileId = metaData.id;
-        await fetch(`https://www.googleapis.com/upload/drive/v3/files/${driveFileId}?uploadType=media`, {
-          method: "PATCH", headers: { ...authHeader(), "Content-Type": file.type }, body: file,
-        });
-      }
-    } catch (err) { console.warn("Paystub Drive upload error:", err); }
+    if (folderId) {
+      try {
+        const fileBase64 = await fileToBase64(file);
+        const res = await drivePost({ action: "uploadBinary", fileName: "paystub_" + file.name, fileBase64, mimeType: file.type, parents: [folderId] });
+        if (res.id) driveFileId = res.id;
+      } catch (err) { console.warn("Paystub Drive upload error:", err); }
+    }
 
-    // OCR extraction
+    // OCR extraction (if Drive is configured)
     let extracted = { grossPay: 0, netPay: 0, payDate: new Date().toISOString().split("T")[0], checkNumber: "", employer: "" };
-    try {
-      const base64 = await new Promise(r => { const reader = new FileReader(); reader.onload = () => r(reader.result.split(",")[1]); reader.readAsDataURL(file); });
-      const boundary = "ocr_ps_" + Date.now();
-      const meta = JSON.stringify({ name: `_ocrps_${Date.now()}`, mimeType: "application/vnd.google-apps.document", parents: [folderId] });
-      const body = [`--${boundary}`, "Content-Type: application/json; charset=UTF-8", "", meta,
-        `--${boundary}`, `Content-Type: ${file.type}`, "Content-Transfer-Encoding: base64", "", base64, `--${boundary}--`].join("\r\n");
-      const uploadRes = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
-        method: "POST", headers: { ...authHeader(), "Content-Type": `multipart/related; boundary="${boundary}"` }, body,
-      });
-      if (uploadRes.ok) {
-        const ocrDoc = await uploadRes.json();
-        if (ocrDoc.id) {
-          const textRes = await fetch(`https://www.googleapis.com/drive/v3/files/${ocrDoc.id}/export?mimeType=text/plain`, { headers: authHeader() });
-          const text = await textRes.text();
-          console.log("=== PAYSTUB OCR ===\n", text);
-          fetch(`https://www.googleapis.com/drive/v3/files/${ocrDoc.id}`, { method: "DELETE", headers: authHeader() }).catch(() => {});
-          extracted = parsePaystubText(text);
-        }
-      }
-    } catch (err) { console.warn("Paystub OCR error:", err); }
+    if (driveConnected) {
+      try {
+        const text = await performOCR(file);
+        console.log("=== PAYSTUB OCR ===\n", text);
+        extracted = parsePaystubText(text);
+      } catch (err) { console.warn("Paystub OCR error:", err); }
+    }
 
     setInvoices(prev => prev.map(inv => inv.id === invoiceId ? {
       ...inv,
@@ -948,7 +890,6 @@ export default function App() {
     const files = Array.from(e.target.files);
     if (!files.length) return;
     e.target.value = "";
-    if (!folderId) { alert("Not connected to Drive yet. Please log out and reconnect."); return; }
 
     setIsUploadingTimecard(true);
     for (const file of files) {
@@ -958,47 +899,25 @@ export default function App() {
 
       setUploadTimecardStatus(`Uploading ${file.name}...`);
       let driveFileId = null;
-      try {
-        const metaRes = await fetch("https://www.googleapis.com/drive/v3/files", {
-          method: "POST", headers: jsonHeaders(),
-          body: JSON.stringify({ name: file.name, parents: [folderId] }),
-        });
-        if (metaRes.ok) {
-          const metaData = await metaRes.json();
-          driveFileId = metaData.id;
-          await fetch(`https://www.googleapis.com/upload/drive/v3/files/${driveFileId}?uploadType=media`, {
-            method: "PATCH", headers: { ...authHeader(), "Content-Type": file.type }, body: file,
-          });
-        }
-      } catch (err) { console.warn("Drive upload error:", err); }
+      if (folderId) {
+        try {
+          const fileBase64 = await fileToBase64(file);
+          const res = await drivePost({ action: "uploadBinary", fileName: file.name, fileBase64, mimeType: file.type, parents: [folderId] });
+          if (res.id) driveFileId = res.id;
+        } catch (err) { console.warn("Drive upload error:", err); }
+      }
 
       setUploadTimecardStatus(`Reading ${file.name}...`);
       let extracted = { company: "", hours: 0, rate: 0, date: new Date().toISOString().split("T")[0], description: "" };
-      try {
-        const rawText = await extractWithDriveOCR(file);
-        // extractWithDriveOCR already calls parseInvoiceText — we need raw text here
-        // so we re-do just the OCR part and call parseTimecardText instead
-        const result = await (async () => {
-          const base64 = await new Promise(r => { const reader = new FileReader(); reader.onload = () => r(reader.result.split(",")[1]); reader.readAsDataURL(file); });
-          const boundary = "ocr_tc_" + Date.now();
-          const meta = JSON.stringify({ name: `_ocrtc_${Date.now()}`, mimeType: "application/vnd.google-apps.document", parents: [folderId] });
-          const body = [`--${boundary}`, "Content-Type: application/json; charset=UTF-8", "", meta,
-            `--${boundary}`, `Content-Type: ${file.type}`, "Content-Transfer-Encoding: base64", "", base64, `--${boundary}--`].join("\r\n");
-          const uploadRes = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
-            method: "POST", headers: { ...authHeader(), "Content-Type": `multipart/related; boundary="${boundary}"` }, body,
-          });
-          if (!uploadRes.ok) throw new Error("OCR upload failed");
-          const ocrDoc = await uploadRes.json();
-          if (!ocrDoc.id) throw new Error("No OCR doc ID");
-          const textRes = await fetch(`https://www.googleapis.com/drive/v3/files/${ocrDoc.id}/export?mimeType=text/plain`, { headers: authHeader() });
-          const text = await textRes.text();
-          fetch(`https://www.googleapis.com/drive/v3/files/${ocrDoc.id}`, { method: "DELETE", headers: authHeader() }).catch(() => {});
-          return parseTimecardText(text);
-        })();
-        if (result) extracted = result;
-      } catch (err) {
-        console.warn("Timecard OCR failed:", err.message);
-        extracted.company = file.name.replace(/\.[^.]+$/, "").replace(/[_\-]+/g, " ");
+      if (driveConnected) {
+        try {
+          const text = await performOCR(file);
+          const result = parseTimecardText(text);
+          if (result) extracted = result;
+        } catch (err) {
+          console.warn("Timecard OCR failed:", err.message);
+          extracted.company = file.name.replace(/\.[^.]+$/, "").replace(/[_\-]+/g, " ");
+        }
       }
       if (!extracted.company) extracted.company = file.name.replace(/\.[^.]+$/, "").replace(/[_\-]+/g, " ");
 
@@ -1139,47 +1058,28 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
 
   // ── TIMECARD PAYSTUB UPLOAD ──────────────────────────────────────────────────
   const handleTimecardPaystubUpload = async (timecardId, file) => {
-    if (!file || !folderId) return;
+    if (!file) return;
     setPaystubUploading(timecardId);
 
     const blobUrl = URL.createObjectURL(file);
     blobCache.current.set("tc_paystub_" + timecardId, { url: blobUrl, type: file.type });
 
     let driveFileId = null;
-    try {
-      const metaRes = await fetch("https://www.googleapis.com/drive/v3/files", {
-        method: "POST", headers: jsonHeaders(),
-        body: JSON.stringify({ name: "tc_paystub_" + file.name, parents: [folderId] }),
-      });
-      if (metaRes.ok) {
-        const metaData = await metaRes.json();
-        driveFileId = metaData.id;
-        await fetch(`https://www.googleapis.com/upload/drive/v3/files/${driveFileId}?uploadType=media`, {
-          method: "PATCH", headers: { ...authHeader(), "Content-Type": file.type }, body: file,
-        });
-      }
-    } catch (err) { console.warn("Timecard paystub Drive upload error:", err); }
+    if (folderId) {
+      try {
+        const fileBase64 = await fileToBase64(file);
+        const res = await drivePost({ action: "uploadBinary", fileName: "tc_paystub_" + file.name, fileBase64, mimeType: file.type, parents: [folderId] });
+        if (res.id) driveFileId = res.id;
+      } catch (err) { console.warn("Timecard paystub Drive upload error:", err); }
+    }
 
     let extracted = { grossPay: 0, netPay: 0, payDate: new Date().toISOString().split("T")[0], checkNumber: "", employer: "" };
-    try {
-      const base64 = await new Promise(r => { const reader = new FileReader(); reader.onload = () => r(reader.result.split(",")[1]); reader.readAsDataURL(file); });
-      const boundary = "ocr_tcp_" + Date.now();
-      const meta = JSON.stringify({ name: `_ocrtcp_${Date.now()}`, mimeType: "application/vnd.google-apps.document", parents: [folderId] });
-      const body = [`--${boundary}`, "Content-Type: application/json; charset=UTF-8", "", meta,
-        `--${boundary}`, `Content-Type: ${file.type}`, "Content-Transfer-Encoding: base64", "", base64, `--${boundary}--`].join("\r\n");
-      const uploadRes = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
-        method: "POST", headers: { ...authHeader(), "Content-Type": `multipart/related; boundary="${boundary}"` }, body,
-      });
-      if (uploadRes.ok) {
-        const ocrDoc = await uploadRes.json();
-        if (ocrDoc.id) {
-          const textRes = await fetch(`https://www.googleapis.com/drive/v3/files/${ocrDoc.id}/export?mimeType=text/plain`, { headers: authHeader() });
-          const text = await textRes.text();
-          fetch(`https://www.googleapis.com/drive/v3/files/${ocrDoc.id}`, { method: "DELETE", headers: authHeader() }).catch(() => {});
-          extracted = parsePaystubText(text);
-        }
-      }
-    } catch (err) { console.warn("Timecard paystub OCR error:", err); }
+    if (driveConnected) {
+      try {
+        const text = await performOCR(file);
+        extracted = parsePaystubText(text);
+      } catch (err) { console.warn("Timecard paystub OCR error:", err); }
+    }
 
     setTimecards(prev => prev.map(tc => tc.id === timecardId ? {
       ...tc,
@@ -1307,17 +1207,9 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
     let driveFileId = null;
     if (folderId) {
       try {
-        const metaRes = await fetch("https://www.googleapis.com/drive/v3/files", {
-          method: "POST", headers: jsonHeaders(),
-          body: JSON.stringify({ name: "receipt_" + file.name, parents: [folderId] }),
-        });
-        if (metaRes.ok) {
-          const metaData = await metaRes.json();
-          driveFileId = metaData.id;
-          await fetch(`https://www.googleapis.com/upload/drive/v3/files/${driveFileId}?uploadType=media`, {
-            method: "PATCH", headers: { ...authHeader(), "Content-Type": file.type }, body: file,
-          });
-        }
+        const fileBase64 = await fileToBase64(file);
+        const res = await drivePost({ action: "uploadBinary", fileName: "receipt_" + file.name, fileBase64, mimeType: file.type, parents: [folderId] });
+        if (res.id) driveFileId = res.id;
       } catch (err) { console.warn("Receipt Drive upload error:", err); }
     }
 
@@ -1333,6 +1225,160 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 pb-20">
 
+      {/* Hidden relink file input */}
+      <input ref={relinkInputRef} type="file" accept=".json,application/json" onChange={handleRelinkFile} className="hidden" />
+
+      {/* ── Relink Confirm Modal ── */}
+      {relinkPreview && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setRelinkPreview(null)}>
+          <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+              <h2 className="font-bold text-slate-800 text-base">Restore Backup?</h2>
+              <button onClick={() => setRelinkPreview(null)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
+            </div>
+            <div className="px-6 py-5 space-y-3 text-sm text-slate-600">
+              <p>This will <strong>replace</strong> your current data with the contents of the backup file. A copy is kept in localStorage.</p>
+              <ul className="text-xs text-slate-500 space-y-0.5 bg-slate-50 rounded-lg p-3">
+                <li>{(relinkPreview.invoices?.length ?? 0)} invoices</li>
+                <li>{(relinkPreview.timecards?.length ?? 0)} timecards</li>
+                <li>{(relinkPreview.purchases?.length ?? 0)} purchases</li>
+                <li>{(relinkPreview.vehicles?.length ?? 0)} vehicles &middot; {(relinkPreview.gasLogs?.length ?? 0)} gas logs</li>
+                <li>{(relinkPreview.mileageLogs?.length ?? 0)} mileage entries</li>
+              </ul>
+            </div>
+            <div className="px-6 pb-5 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setRelinkPreview(null)}>Cancel</Button>
+              <Button onClick={confirmRelink}>Restore</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Drive Setup Modal ── */}
+      {showDriveSetup && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setShowDriveSetup(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+              <div className="flex items-center gap-2.5">
+                <UploadCloud size={18} className="text-blue-600" />
+                <h2 className="font-bold text-slate-800 text-base">Google Drive Backup</h2>
+              </div>
+              <button onClick={() => setShowDriveSetup(false)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
+            </div>
+
+            {/* Connection status bar */}
+            <div className={`px-6 py-3 flex items-center gap-2.5 text-sm border-b ${
+              driveCheckStatus === "ok" || driveConnected
+                ? "bg-emerald-50 border-emerald-100 text-emerald-700"
+                : driveCheckStatus === "error"
+                ? "bg-red-50 border-red-100 text-red-700"
+                : "bg-slate-50 border-slate-100 text-slate-500"
+            }`}>
+              {driveCheckStatus === "checking" ? (
+                <><Loader2 size={15} className="animate-spin" /> Checking connection...</>
+              ) : driveCheckStatus === "ok" || driveConnected ? (
+                <><CheckCircle size={15} /> <span>Connected as <strong>{driveEmail}</strong> — Drive is online</span></>
+              ) : driveCheckStatus === "error" ? (
+                <><AlertCircle size={15} /> <span>{driveCheckError}</span></>
+              ) : (
+                <><CloudOff size={15} /> Not connected — configure below then click Verify</>  
+              )}
+            </div>
+
+            <div className="px-6 py-5 space-y-4 text-sm text-slate-600">
+              {/* Collapse instructions when already connected */}
+              {!driveConnected && (
+                <>
+                  <p>Drive backup uses a <strong>Service Account</strong> — no login popup. Add credentials to <code className="bg-slate-100 px-1 rounded text-xs">.env.local</code> then click <strong>Verify Connection</strong>.</p>
+                  <ol className="list-decimal list-inside space-y-2 text-slate-500">
+                    <li>Go to <button onClick={() => window.open("https://console.cloud.google.com")} className="text-blue-600 underline font-medium">Google Cloud Console</button> → create or select a project</li>
+                    <li>Enable the <button onClick={() => window.open("https://console.cloud.google.com/apis/library/drive.googleapis.com")} className="text-blue-600 underline font-medium">Google Drive API</button></li>
+                    <li>Go to <strong>APIs &amp; Services → Credentials</strong>, click <strong>+ Create Credentials → Service Account</strong>, fill in a name and click through</li>
+                    <li>Back on the Credentials page, click your new service account email under <em>Service Accounts</em></li>
+                    <li>Click the <strong>Keys</strong> tab → <strong>Add Key → Create new key → JSON → Create</strong> — a <code className="bg-slate-100 px-1 rounded text-xs">.json</code> file will download</li>
+                    <li>Open <code className="bg-slate-100 px-1 rounded text-xs">.env.local</code> in the app folder, paste the <em>entire contents</em> of that file between the single quotes:<br />
+                      <code className="bg-slate-100 px-1.5 py-0.5 rounded text-xs block mt-1 break-all">GOOGLE_SERVICE_ACCOUNT_JSON=&apos;&#123;paste entire JSON here&#125;&apos;</code>
+                    </li>
+                    <li>Save and restart the app (<code className="bg-slate-100 px-1 rounded text-xs">Ctrl+C</code> then <code className="bg-slate-100 px-1 rounded text-xs">npm run dev</code>), then click <strong>Verify Connection</strong> below</li>
+                  </ol>
+                </>
+              )}
+
+              {/* Drive folder section */}
+              <div className="border-t border-slate-200 pt-4 space-y-2">
+                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Your Drive Folder</p>
+                <p className="text-xs text-slate-400">
+                  {driveConnected
+                    ? <>Share a folder with <strong className="text-slate-600">{driveEmail}</strong> (Editor access) then paste the URL below. Files will sync there instead of the service account&apos;s private storage.</>
+                    : <>Once connected, share a folder with the service account email and paste its URL here.</>}
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    value={customFolderInput}
+                    onChange={e => setCustomFolderInput(e.target.value)}
+                    placeholder="https://drive.google.com/drive/folders/..."
+                    className="flex-1 border border-slate-300 rounded-md px-3 py-1.5 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <Button
+                    variant="outline"
+                    className="text-xs shrink-0"
+                    disabled={!customFolderInput.trim()}
+                    onClick={() => {
+                      const match = customFolderInput.match(/folders\/([a-zA-Z0-9_-]+)/);
+                      const id = match ? match[1] : customFolderInput.trim();
+                      if (!id) return;
+                      localStorage.setItem("hibp_custom_folder_id", id);
+                      setSavedCustomFolderId(id);
+                      setCustomFolderInput(id);
+                      checkDriveConnection();
+                    }}
+                  >
+                    Use Folder
+                  </Button>
+                  {savedCustomFolderId && (
+                    <Button
+                      variant="ghost"
+                      className="text-xs text-red-500 shrink-0 hover:text-red-700"
+                      onClick={() => {
+                        localStorage.removeItem("hibp_custom_folder_id");
+                        setSavedCustomFolderId("");
+                        setCustomFolderInput("");
+                        checkDriveConnection();
+                      }}
+                    >
+                      Clear
+                    </Button>
+                  )}
+                </div>
+                {savedCustomFolderId && (
+                  <p className="text-xs text-emerald-600 flex items-center gap-1.5">
+                    <CheckCircle size={13} /> Folder saved — ID: <code className="font-mono">{savedCustomFolderId}</code>
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="px-6 pb-5 flex justify-between items-center gap-2">
+              <Button
+                variant="outline"
+                className="gap-1.5"
+                disabled={driveCheckStatus === "checking"}
+                onClick={checkDriveConnection}
+              >
+                {driveCheckStatus === "checking" ? <><Loader2 size={14} className="animate-spin" /> Checking...</> : <><RefreshCw size={14} /> Verify Connection</>}
+              </Button>
+              {driveConnected ? (
+                <Button onClick={() => { setShowDriveSetup(false); syncToDrive(); }} className="gap-1.5">
+                  <RefreshCw size={14} /> Sync Now
+                </Button>
+              ) : (
+                <Button variant="ghost" onClick={() => setShowDriveSetup(false)}>Close</Button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Preview Modal ── */}
       {previewItem && (
         <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" onClick={() => setPreviewItem(null)}>
@@ -1344,9 +1390,9 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
               </div>
               <div className="flex items-center gap-2">
                 {previewItem.fileId && (
-                  <Button variant="outline" onClick={() => window.open(`https://drive.google.com/file/d/${previewItem.fileId}/view`)} className="text-xs">
-                    <ExternalLink size={13} className="mr-1.5" /> Open in Drive
-                  </Button>
+                  <a href={`/api/drive?action=proxy&id=${previewItem.fileId}`} download={previewItem.fileName} className="inline-flex items-center gap-1.5 text-xs border border-slate-300 rounded-md px-3 py-1.5 text-slate-700 hover:bg-slate-50">
+                    <ExternalLink size={13} /> Download
+                  </a>
                 )}
                 <Button variant="ghost" onClick={() => setPreviewItem(null)} className="!px-2"><X size={18} /></Button>
               </div>
@@ -1362,8 +1408,14 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                   </object>
                 )
               ) : previewItem.fileId ? (
-                // Drive embed for invoices loaded from saved data
-                <iframe src={`https://drive.google.com/file/d/${previewItem.fileId}/preview`} className="w-full h-full border-0" style={{ minHeight: "70vh" }} allow="autoplay" title="Invoice preview" />
+                // Drive proxy for invoices loaded from saved data
+                previewItem.fileType?.startsWith("image/") ? (
+                  <img src={`/api/drive?action=proxy&id=${previewItem.fileId}`} alt="Document" className="max-w-full h-auto mx-auto block p-4" />
+                ) : (
+                  <object data={`/api/drive?action=proxy&id=${previewItem.fileId}`} type="application/pdf" className="w-full h-full border-0" style={{ minHeight: "70vh" }}>
+                    <a href={`/api/drive?action=proxy&id=${previewItem.fileId}`} download={previewItem.fileName} className="block p-8 text-center text-blue-600 underline">Download file</a>
+                  </object>
+                )
               ) : (
                 <div className="flex flex-col items-center justify-center h-full gap-3 p-10 text-slate-400">
                   <FileText size={40} />
@@ -1619,19 +1671,35 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
             {driveConnected ? (
               <div className="flex items-center gap-2">
                 <div className="hidden sm:flex flex-col items-end">
-                  <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Drive</span>
+                  <span className="text-[10px] font-semibold text-emerald-600 uppercase tracking-wide flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" /> Online
+                  </span>
                   {lastSynced ? <span className="text-[10px] text-slate-400">Synced {lastSynced}</span> : <span className="text-[10px] text-slate-400">Not yet synced</span>}
                 </div>
                 <Button onClick={syncToDrive} disabled={isSyncing} variant="outline" className="text-xs h-8 gap-1.5">
                   {isSyncing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
                   {isSyncing ? "Syncing..." : "Sync"}
                 </Button>
-                <Button variant="ghost" onClick={disconnectDrive} className="!px-2" title={`Disconnect Drive (${driveName})`}><LogOut size={15} /></Button>
+                <Button onClick={exportData} variant="ghost" className="text-xs h-8 gap-1.5" title="Download backup JSON">
+                  <Download size={13} /> Backup
+                </Button>
+                <Button onClick={() => relinkInputRef.current?.click()} variant="ghost" className="text-xs h-8 gap-1.5" title="Restore from backup file">
+                  <RefreshCw size={13} /> Relink
+                </Button>
+                <Button variant="ghost" onClick={() => setShowDriveSetup(true)} className="!px-2" title={`Drive settings (${driveEmail})`}><LogOut size={15} /></Button>
               </div>
             ) : (
-              <Button onClick={connectDrive} disabled={!googleReady} variant="outline" className="text-xs h-8 gap-1.5">
-                <UploadCloud size={13} />{googleReady ? "Connect Drive" : "Loading..."}
-              </Button>
+              <div className="flex items-center gap-1.5">
+                <Button onClick={exportData} variant="ghost" className="text-xs h-8 gap-1.5" title="Download backup JSON">
+                  <Download size={13} /> Backup
+                </Button>
+                <Button onClick={() => relinkInputRef.current?.click()} variant="ghost" className="text-xs h-8 gap-1.5" title="Restore from backup file">
+                  <RefreshCw size={13} /> Relink
+                </Button>
+                <Button onClick={() => setShowDriveSetup(true)} variant="outline" className="text-xs h-8 gap-1.5">
+                  <UploadCloud size={13} /> Setup Drive
+                </Button>
+              </div>
             )}
           </div>
         </div>
@@ -1644,11 +1712,19 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
           <div className="bg-blue-50 border border-blue-200 rounded-xl px-5 py-3 flex items-center justify-between gap-3 text-blue-700 text-sm">
             <div className="flex items-center gap-2.5">
               <CloudOff size={16} className="shrink-0" />
-              <span><strong>Working offline.</strong> Your data saves automatically to this browser. Connect Google Drive to back up and sync across devices.</span>
+              <span><strong>Working offline.</strong> Your data saves automatically to this browser. Download a backup or restore from a previous one.</span>
             </div>
-            <Button onClick={connectDrive} disabled={!googleReady} variant="outline" className="shrink-0 text-xs h-8 border-blue-300 text-blue-700 hover:bg-blue-100">
-              {googleReady ? "Connect Drive" : "Loading..."}
-            </Button>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button onClick={exportData} variant="outline" className="text-xs h-8 border-blue-300 text-blue-700 hover:bg-blue-100 gap-1.5">
+                <Download size={13} /> Backup
+              </Button>
+              <Button onClick={() => relinkInputRef.current?.click()} variant="outline" className="text-xs h-8 border-blue-300 text-blue-700 hover:bg-blue-100 gap-1.5">
+                <RefreshCw size={13} /> Relink
+              </Button>
+              <Button onClick={() => setShowDriveSetup(true)} variant="outline" className="text-xs h-8 border-blue-300 text-blue-700 hover:bg-blue-100">
+                Setup Drive
+              </Button>
+            </div>
           </div>
         )}
 
@@ -1659,7 +1735,7 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
             <div>
               <p className="font-semibold">Drive upload failed</p>
               <p className="text-red-600 mt-0.5">{uploadError}</p>
-              <button onClick={() => window.open(`https://console.cloud.google.com/apis/library/drive.googleapis.com`)} className="mt-2 underline font-medium">Enable Google Drive API →</button>
+              <button onClick={() => setShowDriveSetup(true)} className="mt-2 underline font-medium">Check service account setup →</button>
             </div>
             <button onClick={() => setUploadError("")} className="ml-auto shrink-0"><X size={16} /></button>
           </div>
