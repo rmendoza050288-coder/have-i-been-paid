@@ -416,6 +416,16 @@ function get6thDayIndex(days) {
 
 const TAX_RATE = 0.25;
 const IRS_MILEAGE_RATE = 0.70; // 2025 IRS standard mileage rate ($/mi)
+
+// Day rate → hourly rate conversion
+// 10hr guarantee: 8h@1x + 2h@1.5x = 11 × hourly
+// 12hr guarantee: 8h@1x + 4h@1.5x = 14 × hourly
+function dayRateToHourly(dayRate, type) {
+  const dr = parseFloat(dayRate);
+  if (!dr || dr <= 0) return "";
+  const divisor = type === "12" ? 14 : 11;
+  return String(parseFloat((dr / divisor).toFixed(4)));
+}
 const FOLDER_NAME = "Have I Been Paid?";
 
 const SIGNATURE_FONTS = [
@@ -438,7 +448,7 @@ export default function App() {
   const [paystubUploading, setPaystubUploading] = useState(null); // invoiceId being processed
   const [syncStatus, setSyncStatus] = useState("Not synced");
   const [previewItem, setPreviewItem] = useState(null);
-  const [newTimecard, setNewTimecard] = useState(() => { const we = getNextSaturday(); return { company: "", jobName: "", jobClassification: "", guarHours: "10", rate: "", weekEnding: we, days: initWeekDays(we), description: "", jobId: "", workerName: "", workerEmail: "", last4SS: "", mileage: "", workPerDiem: "", daysOffPerDiem: "", signatureFont: "Dancing Script", signatureDate: new Date().toISOString().split("T")[0] }; });
+  const [newTimecard, setNewTimecard] = useState(() => { const we = getNextSaturday(); return { company: "", jobName: "", jobClassification: "", guarHours: "10", rate: "", dayRate: "", dayRateType: "10", weekEnding: we, days: initWeekDays(we), description: "", jobId: "", workerName: "", workerEmail: "", last4SS: "", mileage: "", workPerDiem: "", daysOffPerDiem: "", signatureFont: "Dancing Script", signatureDate: new Date().toISOString().split("T")[0] }; });
   const [editingTimecard, setEditingTimecard] = useState(null);
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
   const [jobs, setJobs] = useState([]);
@@ -1082,9 +1092,9 @@ export default function App() {
     const daysOffPerDiem = parseFloat(newTimecard.daysOffPerDiem) || 0;
     const perDiemTotal = parseFloat(days.reduce((a, d) => a + (d.perDiemWork ? workPerDiem : 0) + (d.perDiemOff ? daysOffPerDiem : 0), 0).toFixed(2));
     const total = parseFloat((days.reduce((a, d) => a + (d.hours1x * rate) + (d.hours15x * rate * 1.5) + (d.hours2x * rate * 2), 0) + mealPenaltyPay + perDiemTotal).toFixed(2));
-    setTimecards(prev => [{ id: crypto.randomUUID(), company: newTimecard.company, jobName: newTimecard.jobName, jobClassification: newTimecard.jobClassification, guarHours, hours, rate, total, mealPenaltyPay, workPerDiem, daysOffPerDiem, perDiemTotal, date: newTimecard.weekEnding, days, description: newTimecard.description, status: "Unpaid", jobId: newTimecard.jobId || "", workerName: newTimecard.workerName || "", workerEmail: newTimecard.workerEmail || "", last4SS: newTimecard.last4SS || "", mileage: parseFloat(newTimecard.mileage) || 0, signatureName: newTimecard.workerName || "", signatureFont: newTimecard.signatureFont || "Dancing Script", signatureDate: newTimecard.signatureDate || "", locked: true, timestamp: Date.now() }, ...prev]);
+    setTimecards(prev => [{ id: crypto.randomUUID(), company: newTimecard.company, jobName: newTimecard.jobName, jobClassification: newTimecard.jobClassification, guarHours, hours, rate, dayRate: parseFloat(newTimecard.dayRate) || 0, dayRateType: newTimecard.dayRateType || "10", total, mealPenaltyPay, workPerDiem, daysOffPerDiem, perDiemTotal, date: newTimecard.weekEnding, days, description: newTimecard.description, status: "Unpaid", jobId: newTimecard.jobId || "", workerName: newTimecard.workerName || "", workerEmail: newTimecard.workerEmail || "", last4SS: newTimecard.last4SS || "", mileage: parseFloat(newTimecard.mileage) || 0, signatureName: newTimecard.workerName || "", signatureFont: newTimecard.signatureFont || "Dancing Script", signatureDate: newTimecard.signatureDate || "", locked: true, timestamp: Date.now() }, ...prev]);
     if (newTimecard.jobId) setExpandedJobs(prev => { const n = new Set(prev); n.add(newTimecard.jobId); return n; });
-    setNewTimecard(p => { const we = p.weekEnding; return { company: "", jobName: "", jobClassification: "", guarHours: p.guarHours, rate: "", weekEnding: we, days: initWeekDays(we), description: "", jobId: p.jobId, workerName: p.workerName, workerEmail: p.workerEmail, last4SS: p.last4SS, mileage: "", workPerDiem: p.workPerDiem, daysOffPerDiem: p.daysOffPerDiem, signatureFont: p.signatureFont, signatureDate: new Date().toISOString().split("T")[0] }; });
+    setNewTimecard(p => { const we = p.weekEnding; return { company: "", jobName: "", jobClassification: "", guarHours: p.guarHours, rate: "", dayRate: "", dayRateType: p.dayRateType || "10", weekEnding: we, days: initWeekDays(we), description: "", jobId: p.jobId, workerName: p.workerName, workerEmail: p.workerEmail, last4SS: p.last4SS, mileage: "", workPerDiem: p.workPerDiem, daysOffPerDiem: p.daysOffPerDiem, signatureFont: p.signatureFont, signatureDate: new Date().toISOString().split("T")[0] }; });
   };
 
   const saveTimecardEdit = () => {
@@ -1101,7 +1111,7 @@ export default function App() {
     const total = parseFloat((days.reduce((a, d) => a + (d.hours1x * rate) + (d.hours15x * rate * 1.5) + (d.hours2x * rate * 2), 0) + mealPenaltyPay + perDiemTotal).toFixed(2));
     setTimecards(prev => prev.map(tc => tc.id !== editingTimecard.id ? tc : {
       ...tc, company: editingTimecard.company, jobName: editingTimecard.jobName,
-      jobClassification: editingTimecard.jobClassification, guarHours, rate, date: editingTimecard.weekEnding,
+      jobClassification: editingTimecard.jobClassification, guarHours, rate, dayRate: parseFloat(editingTimecard.dayRate) || 0, dayRateType: editingTimecard.dayRateType || "10", date: editingTimecard.weekEnding,
       days, hours, total, mealPenaltyPay, workPerDiem, daysOffPerDiem, perDiemTotal, description: editingTimecard.description, jobId: editingTimecard.jobId || "",
       workerName: editingTimecard.workerName || "", workerEmail: editingTimecard.workerEmail || "", last4SS: editingTimecard.last4SS || "",
       signatureName: editingTimecard.workerName || "", signatureFont: editingTimecard.signatureFont || "Dancing Script", signatureDate: editingTimecard.signatureDate || "",
@@ -1952,7 +1962,32 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                 </div>
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Rate ($/hr) *</label>
-                  <Input type="number" value={editingTimecard.rate} onChange={e => setEditingTimecard(p => ({ ...p, rate: e.target.value }))} />
+                  <Input type="number" value={editingTimecard.rate} onChange={e => setEditingTimecard(p => ({ ...p, rate: e.target.value, dayRate: "" }))} />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">— or — Day Rate ($)</label>
+                  <div className="flex gap-1">
+                    <Input type="number" value={editingTimecard.dayRate || ""} onChange={e => {
+                      const dr = e.target.value;
+                      const hr = dayRateToHourly(dr, editingTimecard.dayRateType || "10");
+                      setEditingTimecard(p => ({ ...p, dayRate: dr, rate: hr, guarHours: (p.dayRateType || "10") === "12" ? "12" : "10" }));
+                    }} placeholder="e.g. 1650" className="flex-1" />
+                    <div className="flex rounded-lg border border-gray-300 overflow-hidden text-xs font-bold shrink-0">
+                      {["10", "12"].map(t => (
+                        <button key={t} type="button"
+                          onClick={() => {
+                            const hr = dayRateToHourly(editingTimecard.dayRate, t);
+                            setEditingTimecard(p => ({ ...p, dayRateType: t, rate: hr || p.rate, guarHours: t }));
+                          }}
+                          className={`px-2.5 py-1 transition-colors ${(editingTimecard.dayRateType || "10") === t ? "bg-blue-600 text-white" : "bg-white text-slate-500 hover:bg-slate-50"}`}>
+                          {t}hr
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {editingTimecard.dayRate && editingTimecard.rate && (
+                    <p className="text-[10px] text-blue-500">≈ ${parseFloat(editingTimecard.rate).toFixed(4)}/hr (auto-calculated)</p>
+                  )}
                 </div>
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Guar. Hours</label>
@@ -3175,7 +3210,32 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                 </div>
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Rate ($/hr) *</label>
-                  <Input type="number" value={newTimecard.rate} onChange={e => setNewTimecard(p => ({ ...p, rate: e.target.value }))} placeholder="e.g. 750" />
+                  <Input type="number" value={newTimecard.rate} onChange={e => setNewTimecard(p => ({ ...p, rate: e.target.value, dayRate: "" }))} placeholder="e.g. 750" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">— or — Day Rate ($)</label>
+                  <div className="flex gap-1">
+                    <Input type="number" value={newTimecard.dayRate} onChange={e => {
+                      const dr = e.target.value;
+                      const hr = dayRateToHourly(dr, newTimecard.dayRateType);
+                      setNewTimecard(p => ({ ...p, dayRate: dr, rate: hr, guarHours: p.dayRateType === "12" ? "12" : "10" }));
+                    }} placeholder="e.g. 1650" className="flex-1" />
+                    <div className="flex rounded-lg border border-gray-300 overflow-hidden text-xs font-bold shrink-0">
+                      {["10", "12"].map(t => (
+                        <button key={t} type="button"
+                          onClick={() => {
+                            const hr = dayRateToHourly(newTimecard.dayRate, t);
+                            setNewTimecard(p => ({ ...p, dayRateType: t, rate: hr || p.rate, guarHours: t }));
+                          }}
+                          className={`px-2.5 py-1 transition-colors ${newTimecard.dayRateType === t ? "bg-blue-600 text-white" : "bg-white text-slate-500 hover:bg-slate-50"}`}>
+                          {t}hr
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {newTimecard.dayRate && newTimecard.rate && (
+                    <p className="text-[10px] text-blue-500">≈ ${parseFloat(newTimecard.rate).toFixed(4)}/hr (auto-calculated)</p>
+                  )}
                 </div>
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Guar. Hours</label>
@@ -3646,7 +3706,7 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                                   </div>
                                   <div className="p-3 bg-slate-50 border-t border-slate-100 flex gap-2 flex-wrap">
                                     <Button variant="outline" className="flex-none" title={entry.locked ? "Unlock entry to edit" : "Edit timecard"} disabled={!!entry.locked}
-                                      onClick={() => setEditingTimecard({ ...entry, rate: String(entry.rate), guarHours: String(entry.guarHours || ""), weekEnding: entry.date, days: entry.days?.length ? entry.days.map(d => ({ ...d })) : initWeekDays(entry.date) })}>
+                                      onClick={() => setEditingTimecard({ ...entry, rate: String(entry.rate), guarHours: String(entry.guarHours || ""), dayRate: String(entry.dayRate || ""), dayRateType: entry.dayRateType || "10", weekEnding: entry.date, days: entry.days?.length ? entry.days.map(d => ({ ...d })) : initWeekDays(entry.date) })}>
                                       <Pencil size={14} className="mr-1.5" />Edit
                                     </Button>
                                     <Button variant="outline" className="flex-none" title="Download PDF" onClick={() => downloadTimecardPDF(entry)}>
