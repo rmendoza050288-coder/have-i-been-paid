@@ -29,6 +29,9 @@ import {
   Fuel,
   RefreshCw,
   CloudOff,
+  Lock,
+  LockOpen,
+  Layers,
 } from "lucide-react";
 
 const Card = ({ children, className = "" }) => (
@@ -49,9 +52,9 @@ const Button = ({ children, onClick, disabled, variant = "primary", className = 
   return <button onClick={onClick} disabled={disabled} className={`${base} ${v[variant]} ${className}`}>{children}</button>;
 };
 
-const Input = ({ type = "text", value, onChange, placeholder, className = "" }) => (
-  <input type={type} value={value} onChange={onChange} placeholder={placeholder}
-    className={`flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm transition-all focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 ${className}`} />
+const Input = ({ type = "text", value, onChange, placeholder, className = "", disabled = false }) => (
+  <input type={type} value={value} onChange={onChange} placeholder={placeholder} disabled={disabled}
+    className={`flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm transition-all focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-50 ${className}`} />
 );
 
 // ── Parse extracted OCR text for invoice fields ──────────────────────────────
@@ -402,7 +405,7 @@ export default function App() {
   const [purchases, setPurchases] = useState([]);
   const [purchaseSubTab, setPurchaseSubTab] = useState("expendables");
   const [purchaseGroupBy, setPurchaseGroupBy] = useState("job"); // "job" | "vendor"
-  const [newPurchase, setNewPurchase] = useState({ name: "", vendor: "", amount: "", date: new Date().toISOString().split("T")[0], notes: "", serial: "", category: "expendables", jobId: "" });
+  const [newPurchase, setNewPurchase] = useState({ name: "", vendor: "", amount: "", date: new Date().toISOString().split("T")[0], notes: "", serial: "", category: "expendables", jobId: "", isKit: false, kitDailyRate: "", kitWeeklyRate: "" });
   const [mileageLogs, setMileageLogs] = useState([]);
   const [newMileage, setNewMileage] = useState({ date: new Date().toISOString().split("T")[0], miles: "", purpose: "", company: "", jobId: "", vehicle: "" });
   const [vehicles, setVehicles] = useState([]);
@@ -413,12 +416,15 @@ export default function App() {
   const [mileageSubTab, setMileageSubTab] = useState("mileage");
   const [gasLogs, setGasLogs] = useState([]);
   const [newGasLog, setNewGasLog] = useState({ date: new Date().toISOString().split("T")[0], vehicle: "", station: "", pricePerGallon: "", amount: "", notes: "" });
+  const [kitPackages, setKitPackages] = useState([]);
+  const [newPackage, setNewPackage] = useState({ name: "", dailyRate: "", weeklyRate: "", notes: "", barcode: "", itemIds: [] });
+  const [kitSubTab, setKitSubTab] = useState("items");
 
 
 
   // Local blob URL cache: itemId → { url, type }
   const blobCache = useRef(new Map());
-  const hasLoadedRef = useRef(false);
+  const [hydrated, setHydrated] = useState(false);
   useEffect(() => () => blobCache.current.forEach(v => URL.revokeObjectURL(v.url)), []);
 
   // Drive connection state (service account configured and reachable)
@@ -450,13 +456,16 @@ export default function App() {
         if (Array.isArray(d.vehicleExpenses)) setVehicleExpenses(d.vehicleExpenses);
         if (Array.isArray(d.vehicles)) setVehicles(d.vehicles);
         if (Array.isArray(d.gasLogs)) setGasLogs(d.gasLogs);
+        if (Array.isArray(d.kitPackages)) setKitPackages(d.kitPackages);
       }
       const ls = localStorage.getItem("hibp_last_synced");
       if (ls) setLastSynced(ls);
       const cf = localStorage.getItem("hibp_custom_folder_id");
       if (cf) { setCustomFolderInput(cf); setSavedCustomFolderId(cf); }
     } catch {}
-    hasLoadedRef.current = true;
+    // setHydrated(true) triggers a re-render where state is fully loaded
+    // auto-save will only fire after that re-render, never with empty initial state
+    setHydrated(true);
     // Check if service account Drive is configured
     fetch("/api/drive?action=ping")
       .then(r => r.json())
@@ -558,16 +567,12 @@ export default function App() {
   };
 
   const loadManifest = async (fId) => {
+    // Only look up the Drive file ID so syncToDrive knows where to write.
+    // Data is never loaded from Drive automatically — localStorage is always authoritative.
     const d = await drivePost({ action: "listFiles", q: `name='data.json' and '${fId}' in parents and trashed=false` });
     if (d.files?.length > 0) {
-      const fileId = d.files[0].id;
-      setDataFileId(fileId);
-      const fr = await drivePost({ action: "readFile", fileId });
-      const content = fr.content;
-      if (Array.isArray(content)) { setInvoices(content); }
-      else { setInvoices(Array.isArray(content.invoices) ? content.invoices : []); setTimecards(Array.isArray(content.timecards) ? content.timecards : []); setJobs(Array.isArray(content.jobs) ? content.jobs : []); setPurchases(Array.isArray(content.purchases) ? content.purchases : []); setClassifications(Array.isArray(content.classifications) ? content.classifications : []); setMileageLogs(Array.isArray(content.mileageLogs) ? content.mileageLogs : []); setVehicleExpenses(Array.isArray(content.vehicleExpenses) ? content.vehicleExpenses : []); setVehicles(Array.isArray(content.vehicles) ? content.vehicles : []); setGasLogs(Array.isArray(content.gasLogs) ? content.gasLogs : []); }
+      setDataFileId(d.files[0].id);
     }
-    hasLoadedRef.current = true;
   };
 
   const saveManifest = async (inv, tc, j, pur) => {
@@ -575,16 +580,17 @@ export default function App() {
     void inv; void tc; void j; void pur;
   };
 
-  // Auto-save all data to localStorage whenever anything changes
+  // Auto-save all data to localStorage whenever anything changes.
+  // Depends on `hydrated` so it only fires after the load effect's setState calls have rendered.
   useEffect(() => {
-    if (!hasLoadedRef.current) return;
-    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs };
+    if (!hydrated) return;
+    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages };
     try { localStorage.setItem("hibp_data", JSON.stringify(data)); } catch {}
-  }, [invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs]);
+  }, [hydrated, invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages]);
 
   // ── EXPORT / RELINK ──────────────────────────────────────────────────────────
   const exportData = () => {
-    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs };
+    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -614,15 +620,34 @@ export default function App() {
   const confirmRelink = () => {
     const d = relinkPreview;
     if (!d) return;
-    if (Array.isArray(d.invoices)) setInvoices(d.invoices);
-    if (Array.isArray(d.timecards)) setTimecards(d.timecards);
-    if (Array.isArray(d.jobs)) setJobs(d.jobs);
-    if (Array.isArray(d.purchases)) setPurchases(d.purchases);
-    if (Array.isArray(d.classifications)) setClassifications(d.classifications);
-    if (Array.isArray(d.mileageLogs)) setMileageLogs(d.mileageLogs);
-    if (Array.isArray(d.vehicleExpenses)) setVehicleExpenses(d.vehicleExpenses);
-    if (Array.isArray(d.vehicles)) setVehicles(d.vehicles);
-    if (Array.isArray(d.gasLogs)) setGasLogs(d.gasLogs);
+    const newInvoices = Array.isArray(d.invoices) ? d.invoices : invoices;
+    const newTimecards = Array.isArray(d.timecards) ? d.timecards : timecards;
+    const newJobs = Array.isArray(d.jobs) ? d.jobs : jobs;
+    const newPurchases = Array.isArray(d.purchases) ? d.purchases : purchases;
+    const newClassifications = Array.isArray(d.classifications) ? d.classifications : classifications;
+    const newMileageLogs = Array.isArray(d.mileageLogs) ? d.mileageLogs : mileageLogs;
+    const newVehicleExpenses = Array.isArray(d.vehicleExpenses) ? d.vehicleExpenses : vehicleExpenses;
+    const newVehicles = Array.isArray(d.vehicles) ? d.vehicles : vehicles;
+    const newGasLogs = Array.isArray(d.gasLogs) ? d.gasLogs : gasLogs;
+    const newKitPackages = Array.isArray(d.kitPackages) ? d.kitPackages : kitPackages;
+    setInvoices(newInvoices);
+    setTimecards(newTimecards);
+    setJobs(newJobs);
+    setPurchases(newPurchases);
+    setClassifications(newClassifications);
+    setMileageLogs(newMileageLogs);
+    setVehicleExpenses(newVehicleExpenses);
+    setVehicles(newVehicles);
+    setGasLogs(newGasLogs);
+    setKitPackages(newKitPackages);
+    // Write directly to localStorage so data persists immediately
+    try {
+      localStorage.setItem("hibp_data", JSON.stringify({
+        invoices: newInvoices, timecards: newTimecards, jobs: newJobs, purchases: newPurchases,
+        classifications: newClassifications, mileageLogs: newMileageLogs,
+        vehicleExpenses: newVehicleExpenses, vehicles: newVehicles, gasLogs: newGasLogs, kitPackages: newKitPackages,
+      }));
+    } catch {}
     setRelinkPreview(null);
   };
 
@@ -633,7 +658,7 @@ export default function App() {
     try {
       let rFolderId = folderId;
       if (!rFolderId) { await initDrive(); rFolderId = folderId; }
-      const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs };
+      const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages };
       // Root data.json
       if (dataFileId) {
         await drivePost({ action: "updateFile", fileId: dataFileId, content: data });
@@ -760,6 +785,15 @@ export default function App() {
     return parseInvoiceText(text);
   };
 
+  // Save a file to the local offline_files folder via the API
+  const saveFileLocally = async (file) => {
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch("/api/files", { method: "POST", body: form });
+    if (!res.ok) throw new Error("Local file save failed");
+    return file.name;
+  };
+
   // ── UPLOAD ───────────────────────────────────────────────────────────────────
   const handleFileUpload = async (e) => {
     const files = Array.from(e.target.files);
@@ -776,19 +810,13 @@ export default function App() {
       const blobUrl = URL.createObjectURL(file);
       blobCache.current.set(itemId, { url: blobUrl, type: file.type });
 
-      // 2. Upload original file to Drive (if configured)
-      setUploadStatus(`Uploading ${file.name}...`);
-      let driveFileId = null;
-      if (folderId) {
-        try {
-          const fileBase64 = await fileToBase64(file);
-          const res = await drivePost({ action: "uploadBinary", fileName: file.name, fileBase64, mimeType: file.type, parents: [folderId] });
-          if (res.id) driveFileId = res.id;
-          else throw new Error(res.error || "Upload returned no file ID");
-        } catch (err) {
-          console.error("Drive upload error:", err);
-          setUploadError(err.message + " — Check your service account credentials in .env.local");
-        }
+      // 2. Save file to local offline_files folder
+      setUploadStatus(`Saving ${file.name}...`);
+      const driveFileId = null;
+      try {
+        await saveFileLocally(file);
+      } catch (err) {
+        console.warn("Local file save error:", err.message);
       }
 
       // 3. OCR extraction (if Drive is configured)
@@ -820,6 +848,7 @@ export default function App() {
         invoiceNumber: extracted.invoiceNumber || "",
         status: "Pending",
         jobId: uploadJobId || "",
+        locked: true,
         timestamp: Date.now(),
       }, ...prev]);
       if (uploadJobId) setExpandedJobs(prev => { const n = new Set(prev); n.add(uploadJobId); return n; });
@@ -846,15 +875,11 @@ export default function App() {
     const blobUrl = URL.createObjectURL(file);
     blobCache.current.set("paystub_" + invoiceId, { url: blobUrl, type: file.type });
 
-    // Upload to Drive (if configured)
+    // Save paystub to local offline_files folder
     let driveFileId = null;
-    if (folderId) {
-      try {
-        const fileBase64 = await fileToBase64(file);
-        const res = await drivePost({ action: "uploadBinary", fileName: "paystub_" + file.name, fileBase64, mimeType: file.type, parents: [folderId] });
-        if (res.id) driveFileId = res.id;
-      } catch (err) { console.warn("Paystub Drive upload error:", err); }
-    }
+    try {
+      await saveFileLocally(new File([file], "paystub_" + file.name, { type: file.type }));
+    } catch (err) { console.warn("Paystub local save error:", err.message); }
 
     // OCR extraction (if Drive is configured)
     let extracted = { grossPay: 0, netPay: 0, payDate: new Date().toISOString().split("T")[0], checkNumber: "", employer: "" };
@@ -897,15 +922,11 @@ export default function App() {
       const blobUrl = URL.createObjectURL(file);
       blobCache.current.set(itemId, { url: blobUrl, type: file.type });
 
-      setUploadTimecardStatus(`Uploading ${file.name}...`);
+      setUploadTimecardStatus(`Saving ${file.name}...`);
       let driveFileId = null;
-      if (folderId) {
-        try {
-          const fileBase64 = await fileToBase64(file);
-          const res = await drivePost({ action: "uploadBinary", fileName: file.name, fileBase64, mimeType: file.type, parents: [folderId] });
-          if (res.id) driveFileId = res.id;
-        } catch (err) { console.warn("Drive upload error:", err); }
-      }
+      try {
+        await saveFileLocally(file);
+      } catch (err) { console.warn("Timecard local save error:", err.message); }
 
       setUploadTimecardStatus(`Reading ${file.name}...`);
       let extracted = { company: "", hours: 0, rate: 0, date: new Date().toISOString().split("T")[0], description: "" };
@@ -965,7 +986,7 @@ export default function App() {
     const hours = parseFloat(days.reduce((a, d) => a + (d.paidHours ?? d.totalHours), 0).toFixed(2));
     const mealPenaltyPay = parseFloat(days.reduce((a, d) => a + (d.mealPenalty ? rate : 0), 0).toFixed(2));
     const total = parseFloat((days.reduce((a, d) => a + (d.hours1x * rate) + (d.hours15x * rate * 1.5) + (d.hours2x * rate * 2), 0) + mealPenaltyPay).toFixed(2));
-    setTimecards(prev => [{ id: crypto.randomUUID(), company: newTimecard.company, jobName: newTimecard.jobName, jobClassification: newTimecard.jobClassification, guarHours, hours, rate, total, mealPenaltyPay, date: newTimecard.weekEnding, days, description: newTimecard.description, status: "Unpaid", jobId: newTimecard.jobId || "", workerName: newTimecard.workerName || "", workerEmail: newTimecard.workerEmail || "", last4SS: newTimecard.last4SS || "", mileage: parseFloat(newTimecard.mileage) || 0, signatureName: newTimecard.workerName || "", signatureFont: newTimecard.signatureFont || "Dancing Script", signatureDate: newTimecard.signatureDate || "", timestamp: Date.now() }, ...prev]);
+    setTimecards(prev => [{ id: crypto.randomUUID(), company: newTimecard.company, jobName: newTimecard.jobName, jobClassification: newTimecard.jobClassification, guarHours, hours, rate, total, mealPenaltyPay, date: newTimecard.weekEnding, days, description: newTimecard.description, status: "Unpaid", jobId: newTimecard.jobId || "", workerName: newTimecard.workerName || "", workerEmail: newTimecard.workerEmail || "", last4SS: newTimecard.last4SS || "", mileage: parseFloat(newTimecard.mileage) || 0, signatureName: newTimecard.workerName || "", signatureFont: newTimecard.signatureFont || "Dancing Script", signatureDate: newTimecard.signatureDate || "", locked: true, timestamp: Date.now() }, ...prev]);
     if (newTimecard.jobId) setExpandedJobs(prev => { const n = new Set(prev); n.add(newTimecard.jobId); return n; });
     setNewTimecard(p => { const we = p.weekEnding; return { company: "", jobName: "", jobClassification: "", guarHours: p.guarHours, rate: "", weekEnding: we, days: initWeekDays(we), description: "", jobId: p.jobId, workerName: p.workerName, workerEmail: p.workerEmail, last4SS: p.last4SS, mileage: "", signatureFont: p.signatureFont, signatureDate: new Date().toISOString().split("T")[0] }; });
   };
@@ -1188,9 +1209,9 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
   const addPurchase = () => {
     const amount = parseFloat(newPurchase.amount);
     if (!newPurchase.name || isNaN(amount) || amount <= 0) return;
-    setPurchases(prev => [{ id: crypto.randomUUID(), ...newPurchase, amount, timestamp: Date.now() }, ...prev]);
+    setPurchases(prev => [{ id: crypto.randomUUID(), ...newPurchase, amount, locked: true, timestamp: Date.now() }, ...prev]);
     if (newPurchase.jobId) setExpandedJobs(prev => { const n = new Set(prev); n.add("pur_" + newPurchase.jobId); return n; });
-    setNewPurchase(p => ({ name: "", vendor: "", amount: "", date: new Date().toISOString().split("T")[0], notes: "", serial: "", category: p.category, jobId: p.jobId }));
+    setNewPurchase(p => ({ name: "", vendor: "", amount: "", date: new Date().toISOString().split("T")[0], notes: "", serial: "", category: p.category, jobId: p.jobId, isKit: false, kitDailyRate: "", kitWeeklyRate: "" }));
   };
 
   const deletePurchase = (id) => {
@@ -1389,8 +1410,11 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                 {previewItem.invoiceNumber && <p className="text-xs text-slate-400 font-mono">#{previewItem.invoiceNumber}</p>}
               </div>
               <div className="flex items-center gap-2">
-                {previewItem.fileId && (
-                  <a href={`/api/drive?action=proxy&id=${previewItem.fileId}`} download={previewItem.fileName} className="inline-flex items-center gap-1.5 text-xs border border-slate-300 rounded-md px-3 py-1.5 text-slate-700 hover:bg-slate-50">
+                {(previewItem.fileName || previewItem.fileId) && (
+                  <a
+                    href={previewItem.fileName ? `/api/files?name=${encodeURIComponent(previewItem.fileName)}` : `/api/drive?action=proxy&id=${previewItem.fileId}`}
+                    download={previewItem.fileName}
+                    className="inline-flex items-center gap-1.5 text-xs border border-slate-300 rounded-md px-3 py-1.5 text-slate-700 hover:bg-slate-50">
                     <ExternalLink size={13} /> Download
                   </a>
                 )}
@@ -1407,8 +1431,17 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                     <p className="p-8 text-center text-slate-500">PDF preview not supported in this browser. <a href={previewBlob.url} target="_blank" rel="noreferrer" className="text-blue-600 underline">Download instead</a></p>
                   </object>
                 )
+              ) : previewItem.fileName ? (
+                // Local file — served from offline_files/ folder
+                previewItem.fileType?.startsWith("image/") ? (
+                  <img src={`/api/files?name=${encodeURIComponent(previewItem.fileName)}`} alt="Document" className="max-w-full h-auto mx-auto block p-4" />
+                ) : (
+                  <object data={`/api/files?name=${encodeURIComponent(previewItem.fileName)}`} type="application/pdf" className="w-full h-full border-0" style={{ minHeight: "70vh" }}>
+                    <a href={`/api/files?name=${encodeURIComponent(previewItem.fileName)}`} download={previewItem.fileName} className="block p-8 text-center text-blue-600 underline">Download file</a>
+                  </object>
+                )
               ) : previewItem.fileId ? (
-                // Drive proxy for invoices loaded from saved data
+                // Drive proxy fallback for files without a local copy
                 previewItem.fileType?.startsWith("image/") ? (
                   <img src={`/api/drive?action=proxy&id=${previewItem.fileId}`} alt="Document" className="max-w-full h-auto mx-auto block p-4" />
                 ) : (
@@ -1741,8 +1774,8 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
           </div>
         )}
 
-        {/* Year selector */}
-        <div className="flex items-center gap-2 flex-wrap">
+        {/* Year selector — hidden on Kit tab */}
+        <div className={`flex items-center gap-2 flex-wrap ${activeTab === "kit" ? "hidden" : ""}`}>
           <span className="text-xs font-bold text-slate-400 uppercase tracking-wider mr-1">Year</span>
           {allYears.map(yr => (
             <button key={yr} onClick={() => setSelectedYear(yr)}
@@ -1767,6 +1800,9 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
             </button>
             <button onClick={() => { setActiveTab("purchases"); setSearchQuery(""); }} className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "purchases" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
               <ShoppingCart size={14} className="inline mr-1.5 -mt-0.5" />Purchases
+            </button>
+            <button onClick={() => { setActiveTab("kit"); setSearchQuery(""); }} className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "kit" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
+              <Layers size={14} className="inline mr-1.5 -mt-0.5" />Kit / Packages
             </button>
             <button onClick={() => { setActiveTab("mileage"); setSearchQuery(""); }} className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "mileage" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
               <MapPin size={14} className="inline mr-1.5 -mt-0.5" />Mileage
@@ -1885,6 +1921,9 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
               <div className="flex items-center justify-between">
                 <h3 className="text-xl font-bold">Invoices — {selectedYear}</h3>
                 <div className="flex items-center gap-2">
+                  <Button variant="ghost" onClick={() => relinkInputRef.current?.click()} className="h-8 text-xs gap-1.5 text-slate-500" title="Restore data from backup file">
+                    <RefreshCw size={13} /> Restore
+                  </Button>
                   {showNewJobForm ? (
                     <form onSubmit={e => { e.preventDefault(); if (newJobName.trim()) { addJob(newJobName); setNewJobName(""); setShowNewJobForm(false); } }} className="flex gap-2">
                       <Input value={newJobName} onChange={e => setNewJobName(e.target.value)} placeholder="Job name" className="w-48 h-8 text-sm" autoFocus />
@@ -1945,13 +1984,20 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                               {group.items.map((item) => {
                                 const idx = invoices.findIndex(i => i.id === item.id);
-                                return (<Card key={item.id} id={item.id} className={`hover:border-blue-200 transition-all flex flex-col ${highlightedId === item.id ? "ring-2 ring-blue-500 border-blue-400" : ""}`}>
+                                return (<Card key={item.id} id={item.id} className={`transition-all flex flex-col ${item.locked ? "border-amber-200 bg-amber-50/20" : "hover:border-blue-200"} ${highlightedId === item.id ? "ring-2 ring-blue-500 border-blue-400" : ""}`}>
                                   <div className="p-5 flex-1 space-y-4">
                                     <div className="flex justify-between items-start">
                                       <div className={`px-2.5 py-1 rounded-md text-xs font-bold uppercase tracking-wider ${item.status === "Paid" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{item.status}</div>
                                       <div className="flex items-center gap-1">
+                                        <button
+                                          onClick={() => { const n = [...invoices]; n[idx] = { ...n[idx], locked: !n[idx].locked }; setInvoices(n); }}
+                                          className={`p-1.5 rounded-lg transition-colors ${item.locked ? "text-amber-600 bg-amber-100 hover:bg-amber-200" : "text-slate-300 hover:text-slate-500 hover:bg-slate-100"}`}
+                                          title={item.locked ? "Unlock entry to edit" : "Lock entry to prevent edits"}>
+                                          {item.locked ? <Lock size={13} /> : <LockOpen size={13} />}
+                                        </button>
                                         <select value={item.jobId || ""} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], jobId: e.target.value }; setInvoices(n); }}
-                                          className="text-[10px] border border-slate-200 rounded px-1.5 py-0.5 bg-white text-slate-500 focus:outline-none max-w-[100px]" title="Move to job">
+                                          disabled={!!item.locked}
+                                          className="text-[10px] border border-slate-200 rounded px-1.5 py-0.5 bg-white text-slate-500 focus:outline-none max-w-[100px] disabled:opacity-50 disabled:cursor-not-allowed" title="Move to job">
                                           <option value="">Unassigned</option>
                                           {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
                                         </select>
@@ -1972,21 +2018,21 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                                     <div className="space-y-3">
                                       <div className="space-y-1">
                                         <label className="text-[10px] font-bold text-slate-400 uppercase">Client / Company</label>
-                                        <Input value={item.company} placeholder="Click to add company name" onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], company: e.target.value }; setInvoices(n); }} />
+                                        <Input value={item.company} placeholder="Click to add company name" disabled={!!item.locked} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], company: e.target.value }; setInvoices(n); }} />
                                       </div>
                                       <div className="grid grid-cols-2 gap-3">
                                         <div className="space-y-1">
                                           <label className="text-[10px] font-bold text-slate-400 uppercase">Amount ($)</label>
-                                          <Input type="number" value={item.amount} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], amount: e.target.value }; setInvoices(n); }} />
+                                          <Input type="number" value={item.amount} disabled={!!item.locked} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], amount: e.target.value }; setInvoices(n); }} />
                                         </div>
                                         <div className="space-y-1">
                                           <label className="text-[10px] font-bold text-slate-400 uppercase">Date</label>
-                                          <Input type="date" value={item.date} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], date: e.target.value }; setInvoices(n); }} />
+                                          <Input type="date" value={item.date} disabled={!!item.locked} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], date: e.target.value }; setInvoices(n); }} />
                                         </div>
                                       </div>
                                       <div className="space-y-1">
                                         <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><CalendarClock size={10} />Due Date <span className="font-normal normal-case text-slate-300">(default 30 days)</span></label>
-                                        <Input type="date" value={item.dueDate || (() => { const d = new Date(item.date); d.setDate(d.getDate() + 30); return d.toISOString().split("T")[0]; })()} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], dueDate: e.target.value }; setInvoices(n); }} />
+                                        <Input type="date" value={item.dueDate || (() => { const d = new Date(item.date); d.setDate(d.getDate() + 30); return d.toISOString().split("T")[0]; })()} disabled={!!item.locked} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], dueDate: e.target.value }; setInvoices(n); }} />
                                       </div>
                                     </div>
                                   </div>
@@ -2416,15 +2462,22 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                               {group.items.map((entry) => {
                                 const idx = timecards.findIndex(t => t.id === entry.id);
-                                return (<Card key={entry.id} id={entry.id} className={`hover:border-blue-200 transition-all flex flex-col ${highlightedId === entry.id ? "ring-2 ring-violet-500 border-violet-400" : ""}`}>
+                                return (<Card key={entry.id} id={entry.id} className={`transition-all flex flex-col ${entry.locked ? "border-amber-200 bg-amber-50/20" : "hover:border-blue-200"} ${highlightedId === entry.id ? "ring-2 ring-violet-500 border-violet-400" : ""}`}>
                                   <div className="flex-1 flex flex-col">
                                     {/* Card header */}
                                     <div className="p-4 space-y-2">
                                       <div className="flex justify-between items-start">
                                         <div className={`px-2.5 py-1 rounded-md text-xs font-bold uppercase tracking-wider ${entry.status === "Paid" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{entry.status}</div>
                                         <div className="flex items-center gap-1">
+                                          <button
+                                            onClick={() => { const n = [...timecards]; n[idx] = { ...n[idx], locked: !n[idx].locked }; setTimecards(n); }}
+                                            className={`p-1.5 rounded-lg transition-colors ${entry.locked ? "text-amber-600 bg-amber-100 hover:bg-amber-200" : "text-slate-300 hover:text-slate-500 hover:bg-slate-100"}`}
+                                            title={entry.locked ? "Unlock entry to edit" : "Lock entry to prevent edits"}>
+                                            {entry.locked ? <Lock size={13} /> : <LockOpen size={13} />}
+                                          </button>
                                           <select value={entry.jobId || ""} onChange={e => { const n = [...timecards]; n[idx] = { ...n[idx], jobId: e.target.value }; setTimecards(n); }}
-                                            className="text-[10px] border border-slate-200 rounded px-1.5 py-0.5 bg-white text-slate-500 focus:outline-none max-w-[100px]" title="Move to job">
+                                            disabled={!!entry.locked}
+                                            className="text-[10px] border border-slate-200 rounded px-1.5 py-0.5 bg-white text-slate-500 focus:outline-none max-w-[100px] disabled:opacity-50 disabled:cursor-not-allowed" title="Move to job">
                                             <option value="">Unassigned</option>
                                             {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
                                           </select>
@@ -2522,7 +2575,7 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                                     )}
                                   </div>
                                   <div className="p-3 bg-slate-50 border-t border-slate-100 flex gap-2 flex-wrap">
-                                    <Button variant="outline" className="flex-none" title="Edit timecard"
+                                    <Button variant="outline" className="flex-none" title={entry.locked ? "Unlock entry to edit" : "Edit timecard"} disabled={!!entry.locked}
                                       onClick={() => setEditingTimecard({ ...entry, rate: String(entry.rate), guarHours: String(entry.guarHours || ""), weekEnding: entry.date, days: entry.days?.length ? entry.days.map(d => ({ ...d })) : initWeekDays(entry.date) })}>
                                       <Pencil size={14} className="mr-1.5" />Edit
                                     </Button>
@@ -2660,6 +2713,14 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                     {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
                   </select>
                 </div>
+                <div className="flex items-center gap-2">
+                  <label className={`flex items-center gap-1.5 px-3 py-2 rounded-lg border cursor-pointer text-sm font-semibold transition-colors ${
+                    newPurchase.isKit ? "bg-indigo-100 text-indigo-700 border-indigo-300" : "bg-white text-slate-500 border-slate-200 hover:border-slate-300"
+                  }`}>
+                    <input type="checkbox" checked={!!newPurchase.isKit} onChange={e => setNewPurchase(p => ({ ...p, isKit: e.target.checked }))} className="w-4 h-4 rounded accent-indigo-600" />
+                    <Layers size={14} />Kit
+                  </label>
+                </div>
                 <Button onClick={addPurchase} className="h-10"><Plus size={16} className="mr-1.5" /> Add</Button>
               </div>
             </Card>
@@ -2719,20 +2780,38 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                 const PurchaseCard = ({ p }) => {
                   const idx = purchases.findIndex(x => x.id === p.id);
                   const upd = (field, val) => { const n = [...purchases]; n[idx] = { ...n[idx], [field]: val }; setPurchases(n); };
+                  const isLocked = !!p.locked;
                   return (
-                    <Card key={p.id} id={p.id} className={`hover:border-rose-200 transition-all flex flex-col ${highlightedId === p.id ? "ring-2 ring-rose-500 border-rose-400" : ""}`}>
+                    <Card key={p.id} id={p.id} className={`transition-all flex flex-col ${isLocked ? "border-amber-200 bg-amber-50/20" : "hover:border-rose-200"} ${highlightedId === p.id ? "ring-2 ring-rose-500 border-rose-400" : ""}`}>
                       <div className="p-4 space-y-3">
                         <div className="flex justify-between items-start">
-                          <select value={p.category} onChange={e => upd("category", e.target.value)}
-                            className={`text-[10px] font-bold uppercase tracking-wider border rounded px-2 py-0.5 focus:outline-none cursor-pointer ${
-                              p.category === "expendables" ? "bg-rose-100 text-rose-700 border-rose-200" : "bg-violet-100 text-violet-700 border-violet-200"
-                            }`}>
-                            <option value="expendables">Expendables</option>
-                            <option value="equipment">Equipment</option>
-                          </select>
+                          <div className="flex items-center gap-1.5">
+                            <select value={p.category} onChange={e => upd("category", e.target.value)} disabled={isLocked}
+                              className={`text-[10px] font-bold uppercase tracking-wider border rounded px-2 py-0.5 focus:outline-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                                p.category === "expendables" ? "bg-rose-100 text-rose-700 border-rose-200" : "bg-violet-100 text-violet-700 border-violet-200"
+                              }`}>
+                              <option value="expendables">Expendables</option>
+                              <option value="equipment">Equipment</option>
+                            </select>
+                            {/* Kit checkbox */}
+                            <label className={`flex items-center gap-1 px-2 py-0.5 rounded border cursor-pointer text-[10px] font-bold uppercase tracking-wider transition-colors ${
+                              p.isKit ? "bg-indigo-100 text-indigo-700 border-indigo-200" : "bg-slate-100 text-slate-500 border-slate-200 hover:border-slate-300"
+                            } ${isLocked ? "opacity-50 cursor-not-allowed pointer-events-none" : ""}`}>
+                              <input type="checkbox" checked={!!p.isKit} disabled={isLocked}
+                                onChange={e => upd("isKit", e.target.checked)}
+                                className="w-3 h-3 rounded accent-indigo-600 cursor-pointer" />
+                              Kit
+                            </label>
+                          </div>
                           <div className="flex items-center gap-1">
-                            <select value={p.jobId || ""} onChange={e => upd("jobId", e.target.value)}
-                              className="text-[10px] border border-slate-200 rounded px-1.5 py-0.5 bg-white text-slate-500 focus:outline-none max-w-[90px]" title="Move to job">
+                            <button
+                              onClick={() => upd("locked", !p.locked)}
+                              className={`p-1.5 rounded-lg transition-colors ${isLocked ? "text-amber-600 bg-amber-100 hover:bg-amber-200" : "text-slate-300 hover:text-slate-500 hover:bg-slate-100"}`}
+                              title={isLocked ? "Unlock entry to edit" : "Lock entry to prevent edits"}>
+                              {isLocked ? <Lock size={13} /> : <LockOpen size={13} />}
+                            </button>
+                            <select value={p.jobId || ""} onChange={e => upd("jobId", e.target.value)} disabled={isLocked}
+                              className="text-[10px] border border-slate-200 rounded px-1.5 py-0.5 bg-white text-slate-500 focus:outline-none max-w-[90px] disabled:opacity-50 disabled:cursor-not-allowed" title="Move to job">
                               <option value="">Unassigned</option>
                               {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
                             </select>
@@ -2741,30 +2820,48 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                         </div>
                         <div className="space-y-1">
                           <label className="text-[10px] font-bold text-slate-400 uppercase">Item Name</label>
-                          <Input value={p.name} placeholder="Item name" onChange={e => upd("name", e.target.value)} />
+                          <Input value={p.name} placeholder="Item name" disabled={isLocked} onChange={e => upd("name", e.target.value)} />
                         </div>
                         <div className="space-y-1">
                           <label className="text-[10px] font-bold text-slate-400 uppercase">Vendor</label>
-                          <Input value={p.vendor || ""} placeholder="Vendor / store" onChange={e => upd("vendor", e.target.value)} />
+                          <Input value={p.vendor || ""} placeholder="Vendor / store" disabled={isLocked} onChange={e => upd("vendor", e.target.value)} />
                         </div>
                         <div className="grid grid-cols-2 gap-3">
                           <div className="space-y-1">
                             <label className="text-[10px] font-bold text-slate-400 uppercase">Amount ($)</label>
-                            <Input type="number" value={p.amount} onChange={e => upd("amount", e.target.value)} />
+                            <Input type="number" value={p.amount} disabled={isLocked} onChange={e => upd("amount", e.target.value)} />
                           </div>
                           <div className="space-y-1">
                             <label className="text-[10px] font-bold text-slate-400 uppercase">Date</label>
-                            <Input type="date" value={p.date} onChange={e => upd("date", e.target.value)} />
+                            <Input type="date" value={p.date} disabled={isLocked} onChange={e => upd("date", e.target.value)} />
                           </div>
                         </div>
                         <div className="space-y-1">
                           <label className="text-[10px] font-bold text-slate-400 uppercase">Notes</label>
-                          <Input value={p.notes || ""} placeholder="Optional notes" onChange={e => upd("notes", e.target.value)} />
+                          <Input value={p.notes || ""} placeholder="Optional notes" disabled={isLocked} onChange={e => upd("notes", e.target.value)} />
                         </div>
                         <div className="space-y-1">
                           <label className="text-[10px] font-bold text-slate-400 uppercase">Serial Number</label>
-                          <Input value={p.serial || ""} placeholder="e.g. SN123456789" onChange={e => upd("serial", e.target.value)} className="font-mono" />
+                          <Input value={p.serial || ""} placeholder="e.g. SN123456789" disabled={isLocked} onChange={e => upd("serial", e.target.value)} className="font-mono" />
                         </div>
+                        {/* Kit rental rates — shown only when isKit is checked */}
+                        {p.isKit && (
+                          <div className="pt-2 border-t border-indigo-100 space-y-2">
+                            <p className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider flex items-center gap-1.5">
+                              <Layers size={10} />Kit Rental Rates
+                            </p>
+                            <div className="grid grid-cols-2 gap-3">
+                              <div className="space-y-1">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase">Daily Rate ($)</label>
+                                <Input type="number" value={p.kitDailyRate || ""} placeholder="0.00" disabled={isLocked} onChange={e => upd("kitDailyRate", e.target.value)} />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase">Weekly Rate ($)</label>
+                                <Input type="number" value={p.kitWeeklyRate || ""} placeholder="0.00" disabled={isLocked} onChange={e => upd("kitWeeklyRate", e.target.value)} />
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
                       <div className="p-3 bg-slate-50 border-t border-slate-100 flex gap-2">
                         {!p.receipt ? (
@@ -2832,6 +2929,262 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
             </div>
           </>
         )}
+
+        {activeTab === "kit" && (() => {
+          const kitItems = purchases.filter(p => p.isKit);
+          const updKitItem = (id, field, val) => {
+            setPurchases(prev => prev.map(p => p.id === id ? { ...p, [field]: val } : p));
+          };
+          const deletePackage = (pkgId) => setKitPackages(prev => prev.filter(x => x.id !== pkgId));
+          const updPackage = (pkgId, field, val) => setKitPackages(prev => prev.map(p => p.id === pkgId ? { ...p, [field]: val } : p));
+          const removeItemFromPackage = (pkgId, itemId) => {
+            setKitPackages(prev => prev.map(pkg =>
+              pkg.id !== pkgId ? pkg : { ...pkg, itemIds: (pkg.itemIds || []).filter(x => x !== itemId) }
+            ));
+          };
+          const addItemToPackage = (pkgId, itemId) => {
+            if (!itemId) return;
+            setKitPackages(prev => prev.map(pkg =>
+              pkg.id !== pkgId ? pkg : { ...pkg, itemIds: [...new Set([...(pkg.itemIds || []), itemId])] }
+            ));
+          };
+          const addPackage = () => {
+            if (!newPackage.name.trim()) return;
+            setKitPackages(prev => [...prev, {
+              id: crypto.randomUUID(),
+              name: newPackage.name.trim(),
+              dailyRate: newPackage.dailyRate,
+              weeklyRate: newPackage.weeklyRate,
+              notes: newPackage.notes,
+              barcode: newPackage.barcode,
+              itemIds: [],
+              locked: true,
+              timestamp: Date.now(),
+            }]);
+            setNewPackage({ name: "", dailyRate: "", weeklyRate: "", notes: "", barcode: "", itemIds: [] });
+          };
+          const totalKitDailyRate = kitItems.reduce((a, p) => a + (parseFloat(p.kitDailyRate) || 0), 0);
+          const totalKitWeeklyRate = kitItems.reduce((a, p) => a + (parseFloat(p.kitWeeklyRate) || 0), 0);
+
+          return (
+            <>
+              {/* Stats */}
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                <Card className="p-6 bg-indigo-50 border-indigo-200">
+                  <p className="text-indigo-700 text-sm font-medium">Kit Items</p>
+                  <h2 className="text-3xl font-bold mt-1 text-indigo-700">{kitItems.length}</h2>
+                </Card>
+                <Card className="p-6 bg-indigo-50 border-indigo-200">
+                  <p className="text-indigo-700 text-sm font-medium">Total Daily Rate</p>
+                  <h2 className="text-3xl font-bold mt-1 text-indigo-700">${totalKitDailyRate.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
+                </Card>
+                <Card className="p-6 bg-indigo-50 border-indigo-200">
+                  <p className="text-indigo-700 text-sm font-medium">Total Weekly Rate</p>
+                  <h2 className="text-3xl font-bold mt-1 text-indigo-700">${totalKitWeeklyRate.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
+                </Card>
+              </div>
+
+              {/* Sub-tabs */}
+              <div className="flex gap-1 bg-slate-100 p-1 rounded-xl w-fit">
+                <button onClick={() => setKitSubTab("items")} className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-all ${kitSubTab === "items" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
+                  <Layers size={13} className="inline mr-1.5 -mt-0.5" />Kit Items
+                </button>
+                <button onClick={() => setKitSubTab("packages")} className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-all ${kitSubTab === "packages" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
+                  <Package size={13} className="inline mr-1.5 -mt-0.5" />Packages ({kitPackages.length})
+                </button>
+              </div>
+
+              {/* Kit Items sub-tab */}
+              {kitSubTab === "items" && (
+                <>
+                  {kitItems.length === 0 ? (
+                    <div className="py-20 text-center bg-white border-2 border-dashed border-slate-200 rounded-2xl">
+                      <div className="bg-slate-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300"><Layers size={32} /></div>
+                      <h4 className="text-slate-900 font-semibold">No kit items yet</h4>
+                      <p className="text-slate-500 text-sm mt-1">Check the "Kit" box on a purchase entry to add it here.</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {kitItems.map(p => {
+                        const kitLocked = !!p.locked;
+                        return (
+                        <Card key={p.id} className={`space-y-3 transition-all ${kitLocked ? "border-amber-200 bg-amber-50/20" : ""}`}>
+                          <div className="p-4 space-y-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="font-semibold text-slate-800 truncate">{p.name || <span className="text-slate-400 italic">Unnamed item</span>}</p>
+                              {p.vendor && <p className="text-xs text-slate-500 truncate">{p.vendor}</p>}
+                              {p.serial && <p className="text-[10px] text-slate-400 font-mono truncate">SN: {p.serial}</p>}
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <span className={`text-[10px] font-bold uppercase tracking-wider border rounded px-2 py-0.5 ${
+                                p.category === "expendables" ? "bg-rose-100 text-rose-700 border-rose-200" : "bg-violet-100 text-violet-700 border-violet-200"
+                              }`}>{p.category}</span>
+                              <button
+                                onClick={() => updKitItem(p.id, "locked", !p.locked)}
+                                className={`p-1.5 rounded-lg transition-colors ${kitLocked ? "text-amber-600 bg-amber-100 hover:bg-amber-200" : "text-slate-300 hover:text-slate-500 hover:bg-slate-100"}`}
+                                title={kitLocked ? "Unlock to edit" : "Lock entry"}>
+                                {kitLocked ? <Lock size={13} /> : <LockOpen size={13} />}
+                              </button>
+                            </div>
+                          </div>
+                          <div className="pt-2 border-t border-indigo-100 space-y-2">
+                            <p className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider flex items-center gap-1.5"><Layers size={10} />Kit Rental Rates</p>
+                            <div className="grid grid-cols-2 gap-3">
+                              <div className="space-y-1">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase">Daily ($)</label>
+                                <Input type="number" value={p.kitDailyRate || ""} placeholder="0.00" disabled={kitLocked} onChange={e => updKitItem(p.id, "kitDailyRate", e.target.value)} />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase">Weekly ($)</label>
+                                <Input type="number" value={p.kitWeeklyRate || ""} placeholder="0.00" disabled={kitLocked} onChange={e => updKitItem(p.id, "kitWeeklyRate", e.target.value)} />
+                              </div>
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-[10px] font-bold text-slate-400 uppercase">Barcode</label>
+                              <Input value={p.barcode || ""} placeholder="Scan or enter barcode" disabled={kitLocked} onChange={e => updKitItem(p.id, "barcode", e.target.value)} className="font-mono" />
+                            </div>
+                          </div>
+                          </div>
+                        </Card>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* Packages sub-tab */}
+              {kitSubTab === "packages" && (
+                <>
+                  {/* New package form */}
+                  <Card className="p-5 space-y-4 border-indigo-200 bg-indigo-50/30">
+                    <h3 className="font-semibold text-slate-800 flex items-center gap-2"><Package size={16} className="text-indigo-500" />New Package</h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase">Package Name</label>
+                        <Input value={newPackage.name} placeholder="e.g. Camera Package A" onChange={e => setNewPackage(p => ({ ...p, name: e.target.value }))} />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase">Daily Rate ($)</label>
+                        <Input type="number" value={newPackage.dailyRate} placeholder="0.00" onChange={e => setNewPackage(p => ({ ...p, dailyRate: e.target.value }))} />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase">Weekly Rate ($)</label>
+                        <Input type="number" value={newPackage.weeklyRate} placeholder="0.00" onChange={e => setNewPackage(p => ({ ...p, weeklyRate: e.target.value }))} />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase">Barcode</label>
+                        <Input value={newPackage.barcode} placeholder="Scan or enter barcode" onChange={e => setNewPackage(p => ({ ...p, barcode: e.target.value }))} className="font-mono" />
+                      </div>
+                    </div>
+                    <Button onClick={addPackage} disabled={!newPackage.name.trim()}><Plus size={15} className="mr-1.5" />Create Package</Button>
+                  </Card>
+
+                  {/* Existing packages as windows */}
+                  {kitPackages.length === 0 ? (
+                    <div className="py-16 text-center bg-white border-2 border-dashed border-slate-200 rounded-2xl">
+                      <div className="bg-slate-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300"><Package size={32} /></div>
+                      <h4 className="text-slate-900 font-semibold">No packages yet</h4>
+                      <p className="text-slate-500 text-sm mt-1">Use the form above to create your first package.</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {kitPackages.map(pkg => {
+                        const pkgItems = kitItems.filter(p => (pkg.itemIds || []).includes(p.id));
+                        const availableToAdd = kitItems.filter(p => !(pkg.itemIds || []).includes(p.id));
+                        const pkgLocked = !!pkg.locked;
+                        return (
+                          <Card key={pkg.id} className={`flex flex-col overflow-hidden transition-all ${pkgLocked ? "border-amber-200" : "border-indigo-200"}`}>
+                            {/* Window title bar */}
+                            <div className={`flex items-center justify-between px-4 py-3 text-white ${pkgLocked ? "bg-amber-500" : "bg-indigo-600"}`}>
+                              <div className="flex items-center gap-2 min-w-0">
+                                <Package size={14} className="shrink-0" />
+                                <input
+                                  value={pkg.name}
+                                  disabled={pkgLocked}
+                                  onChange={e => updPackage(pkg.id, "name", e.target.value)}
+                                  className="bg-transparent font-semibold text-sm truncate border-b border-transparent hover:border-white/50 focus:border-white focus:outline-none w-full disabled:cursor-not-allowed"
+                                />
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                                <button
+                                  onClick={() => updPackage(pkg.id, "locked", !pkg.locked)}
+                                  className="text-white/70 hover:text-white transition-colors"
+                                  title={pkgLocked ? "Unlock to edit" : "Lock package"}>
+                                  {pkgLocked ? <Lock size={14} /> : <LockOpen size={14} />}
+                                </button>
+                                <button onClick={() => deletePackage(pkg.id)} className="text-white/70 hover:text-white transition-colors" title="Delete package">
+                                  <X size={15} />
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Window body */}
+                            <div className={`p-4 space-y-4 flex-1 ${pkgLocked ? "bg-amber-50/20" : ""}`}>
+                              {/* Rates */}
+                              <div className="grid grid-cols-2 gap-3">
+                                <div className="space-y-1">
+                                  <label className="text-[10px] font-bold text-slate-400 uppercase">Daily Rate ($)</label>
+                                  <Input type="number" value={pkg.dailyRate} placeholder="0.00" disabled={pkgLocked} onChange={e => updPackage(pkg.id, "dailyRate", e.target.value)} />
+                                </div>
+                                <div className="space-y-1">
+                                  <label className="text-[10px] font-bold text-slate-400 uppercase">Weekly Rate ($)</label>
+                                  <Input type="number" value={pkg.weeklyRate} placeholder="0.00" disabled={pkgLocked} onChange={e => updPackage(pkg.id, "weeklyRate", e.target.value)} />
+                                </div>
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase">Barcode</label>
+                                <Input value={pkg.barcode || ""} placeholder="Scan or enter barcode" disabled={pkgLocked} onChange={e => updPackage(pkg.id, "barcode", e.target.value)} className="font-mono" />
+                              </div>
+
+                              {/* Items in this package */}
+                              {pkgItems.length > 0 && (
+                                <div className="space-y-1.5">
+                                  <p className="text-[10px] font-bold text-slate-400 uppercase">Items ({pkgItems.length})</p>
+                                  {pkgItems.map(item => (
+                                    <div key={item.id} className="flex items-center justify-between gap-2 px-3 py-1.5 bg-indigo-50 border border-indigo-100 rounded-lg">
+                                      <span className="text-sm text-slate-700 truncate">{item.name || "Unnamed"}</span>
+                                      {!pkgLocked && <button onClick={() => removeItemFromPackage(pkg.id, item.id)} className="shrink-0 text-slate-300 hover:text-rose-500 transition-colors" title="Remove from package">
+                                        <X size={13} />
+                                      </button>}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+
+                              {/* Add item dropdown */}
+                              {!pkgLocked && availableToAdd.length > 0 && (
+                                <div className="space-y-1">
+                                  <label className="text-[10px] font-bold text-slate-400 uppercase">Add Item from Kit</label>
+                                  <select
+                                    defaultValue=""
+                                    onChange={e => { addItemToPackage(pkg.id, e.target.value); e.target.value = ""; }}
+                                    className="flex w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400">
+                                    <option value="" disabled>— select a kit item —</option>
+                                    {availableToAdd.map(item => (
+                                      <option key={item.id} value={item.id}>{item.name || "Unnamed"}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              )}
+                              {availableToAdd.length === 0 && kitItems.length > 0 && (
+                                <p className="text-[10px] text-slate-400 italic">All kit items are in this package.</p>
+                              )}
+                              {kitItems.length === 0 && (
+                                <p className="text-[10px] text-slate-400 italic">No kit items yet. Mark a purchase as Kit to add items here.</p>
+                              )}
+                            </div>
+                          </Card>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          );
+        })()}
 
         {activeTab === "mileage" && (
           <>

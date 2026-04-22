@@ -1,0 +1,66 @@
+{
+  "invoices": [
+    {
+      "id": "sample-invoice-1",
+      "fileId": "google_drive_file_id",
+      "fileName": "sample_invoice.pdf",
+      "fileType": "application/pdf",
+      "company": "ABC Productions",
+      "amount": 1500.00,
+      "date": "2024-01-15",
+      "invoiceNumber": "INV-001",
+      "status": "Paid",
+      "jobId": "sample-job-1",
+      "timestamp": 1705276800000
+    }
+  ],
+  "timecards": [
+    {
+      "id": "sample-timecard-1",
+      "company": "ABC Productions",
+      "jobName": "Project Alpha",
+      "jobClassification": "DIT",
+      "guarHours": 12,
+      "hours": 60,
+      "rate": 50,
+      "total": 3000,
+      "mealPenaltyPay": 0,
+      "date": "2024-01-20",
+      "days": [],
+      "description": "Sample timecard entry",
+      "status": "Paid",
+      "jobId": "sample-job-1",
+      "workerName": "Your Name",
+      "timestamp": 1705420800000
+    }
+  ],
+  "jobs": [
+    {
+      "id": "sample-job-1",
+      "name": "Project Alpha",
+      "timestamp": 1705276800000
+    }
+  ],
+  "purchases": [
+    {
+      "id": "sample-purchase-1",
+      "name": "Equipment Sample",
+      "vendor": "Retail Store",
+      "amount": "500",
+      "date": "2024-01-10",
+      "notes": "Sample purchase",
+      "serial": "SAMPLE123",
+      "category": "equipment",
+      "jobId": "",
+      "timestamp": 1705190400000
+    }
+  ],
+  "classifications": [
+    "Digital Image Technician",
+    "Data Wrangler"
+  ],
+  "mileageLogs": [],
+  "vehicleExpenses": [],
+  "vehicles": [],
+  "gasLogs": []
+}
