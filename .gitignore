@@ -21,6 +21,9 @@ context_*.json
 context_*.md
 data.json
 
+# Local offline data (personal financial records)
+offline_files/
+
 # macOS
 .DS_Store
 Thumbs.db

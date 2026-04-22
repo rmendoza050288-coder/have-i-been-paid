@@ -11,6 +11,7 @@ const MIME_TYPES = {
   ".jpeg": "image/jpeg",
   ".gif": "image/gif",
   ".webp": "image/webp",
+  ".html": "text/html",
 };
 
 function findFileRecursive(dir, name, depth = 0) {
@@ -79,13 +80,19 @@ export async function POST(req) {
     return NextResponse.json({ error: "Invalid filename" }, { status: 400 });
   }
 
-  const destPath = path.join(FILES_DIR, name);
+  const subfolder = formData.get("subfolder");
+  if (subfolder && (subfolder.includes("..") || subfolder.includes("/") || subfolder.includes("\\") || subfolder.includes("\0"))) {
+    return NextResponse.json({ error: "Invalid subfolder" }, { status: 400 });
+  }
+
+  const dir = subfolder ? path.join(FILES_DIR, subfolder) : FILES_DIR;
+  const destPath = path.join(dir, name);
   if (!path.resolve(destPath).startsWith(path.resolve(FILES_DIR))) {
     return NextResponse.json({ error: "Invalid path" }, { status: 403 });
   }
 
   try {
-    fs.mkdirSync(FILES_DIR, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true });
     const buffer = Buffer.from(await file.arrayBuffer());
     fs.writeFileSync(destPath, buffer);
   } catch (err) {

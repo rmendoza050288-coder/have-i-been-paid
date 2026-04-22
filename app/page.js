@@ -334,7 +334,7 @@ function initWeekDays(weekEnding) {
   return Array.from({ length: 7 }, (_, i) => {
     const d = new Date(sat);
     d.setDate(sat.getDate() - (6 - i));
-    return { date: d.toISOString().split("T")[0], day: DAY_NAMES[d.getDay()], call: "", meal1Out: "", meal1In: "", meal2Out: "", meal2In: "", wrap: "", mealPenalty: false, totalHours: 0, hours1x: 0, hours15x: 0, hours2x: 0 };
+    return { date: d.toISOString().split("T")[0], day: DAY_NAMES[d.getDay()], call: "", meal1Out: "", meal1In: "", meal2Out: "", meal2In: "", wrap: "", mealPenalty: false, perDiemWork: false, perDiemOff: false, totalHours: 0, hours1x: 0, hours15x: 0, hours2x: 0 };
   });
 }
 
@@ -364,6 +364,56 @@ function calcOTBreakdown(hours) {
   return { hours1x: 8, hours15x: 4, hours2x: parseFloat((hours - 12).toFixed(2)) };
 }
 
+function calcOTBreakdown6thDay(hours) {
+  // 6th-day premium: first 12h all at 1.5×, beyond 12h at 2×
+  if (hours <= 12) return { hours1x: 0, hours15x: parseFloat(hours.toFixed(2)), hours2x: 0 };
+  return { hours1x: 0, hours15x: 12, hours2x: parseFloat((hours - 12).toFixed(2)) };
+}
+
+function applyWeekOTRules(days, guarHours) {
+  // Find worked days sorted by date to determine 5th and 6th
+  const worked = days
+    .map((d, i) => ({ i, date: d.date, actualHours: calcDayHours(d) }))
+    .filter(x => x.actualHours > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  let sixthDayIdx = null;
+  if (worked.length >= 6) {
+    const day5 = days[worked[4].i];
+    const day6 = days[worked[5].i];
+    sixthDayIdx = worked[5].i;
+    // Check if 36+ hours of rest between day5 wrap and day6 call — if so, treat normally
+    if (day5.wrap && day6.call && day5.date && day6.date) {
+      const wrapMs = new Date(day5.date + "T" + day5.wrap).getTime();
+      const callMs = new Date(day6.date + "T" + day6.call).getTime();
+      if ((callMs - wrapMs) / (1000 * 60 * 60) >= 36) sixthDayIdx = null;
+    }
+  }
+
+  return days.map((d, i) => {
+    const actualHours = calcDayHours(d);
+    const paidHours = actualHours > 0 ? Math.max(actualHours, guarHours) : 0;
+    const breakdown = (i === sixthDayIdx) ? calcOTBreakdown6thDay(paidHours) : calcOTBreakdown(paidHours);
+    return { ...d, totalHours: actualHours, paidHours, ...breakdown };
+  });
+}
+
+function get6thDayIndex(days) {
+  const worked = days
+    .map((d, i) => ({ i, date: d.date, actualHours: calcDayHours(d) }))
+    .filter(x => x.actualHours > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  if (worked.length < 6) return -1;
+  const day5 = days[worked[4].i];
+  const day6 = days[worked[5].i];
+  if (day5.wrap && day6.call && day5.date && day6.date) {
+    const wrapMs = new Date(day5.date + "T" + day5.wrap).getTime();
+    const callMs = new Date(day6.date + "T" + day6.call).getTime();
+    if ((callMs - wrapMs) / (1000 * 60 * 60) >= 36) return -1;
+  }
+  return worked[5].i;
+}
+
 const TAX_RATE = 0.25;
 const IRS_MILEAGE_RATE = 0.70; // 2025 IRS standard mileage rate ($/mi)
 const FOLDER_NAME = "Have I Been Paid?";
@@ -388,7 +438,7 @@ export default function App() {
   const [paystubUploading, setPaystubUploading] = useState(null); // invoiceId being processed
   const [syncStatus, setSyncStatus] = useState("Not synced");
   const [previewItem, setPreviewItem] = useState(null);
-  const [newTimecard, setNewTimecard] = useState(() => { const we = getNextSaturday(); return { company: "", jobName: "", jobClassification: "", guarHours: "10", rate: "", weekEnding: we, days: initWeekDays(we), description: "", jobId: "", workerName: "", workerEmail: "", last4SS: "", mileage: "", signatureFont: "Dancing Script", signatureDate: new Date().toISOString().split("T")[0] }; });
+  const [newTimecard, setNewTimecard] = useState(() => { const we = getNextSaturday(); return { company: "", jobName: "", jobClassification: "", guarHours: "10", rate: "", weekEnding: we, days: initWeekDays(we), description: "", jobId: "", workerName: "", workerEmail: "", last4SS: "", mileage: "", workPerDiem: "", daysOffPerDiem: "", signatureFont: "Dancing Script", signatureDate: new Date().toISOString().split("T")[0] }; });
   const [editingTimecard, setEditingTimecard] = useState(null);
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
   const [jobs, setJobs] = useState([]);
@@ -419,6 +469,17 @@ export default function App() {
   const [kitPackages, setKitPackages] = useState([]);
   const [newPackage, setNewPackage] = useState({ name: "", dailyRate: "", weeklyRate: "", notes: "", barcode: "", itemIds: [] });
   const [kitSubTab, setKitSubTab] = useState("items");
+
+  // ── INVOICE GENERATOR ───────────────────────────────────────────────────────
+  const [showInvoiceGenerator, setShowInvoiceGenerator] = useState(false);
+  const [invoiceForm, setInvoiceForm] = useState(null);
+  const [clients, setClients] = useState([]);
+  const [showClientManager, setShowClientManager] = useState(false);
+  const [newClient, setNewClient] = useState({ name: "", address: "", city: "", state: "", zip: "", email: "", phone: "" });
+  const [pkgQaId, setPkgQaId] = useState("");
+  const [pkgQaRateType, setPkgQaRateType] = useState("daily");
+  const [pkgQaQty, setPkgQaQty] = useState("1");
+  const [pkgQaExpand, setPkgQaExpand] = useState(false);
 
 
 
@@ -457,6 +518,7 @@ export default function App() {
         if (Array.isArray(d.vehicles)) setVehicles(d.vehicles);
         if (Array.isArray(d.gasLogs)) setGasLogs(d.gasLogs);
         if (Array.isArray(d.kitPackages)) setKitPackages(d.kitPackages);
+        if (Array.isArray(d.clients)) setClients(d.clients);
       }
       const ls = localStorage.getItem("hibp_last_synced");
       if (ls) setLastSynced(ls);
@@ -584,13 +646,13 @@ export default function App() {
   // Depends on `hydrated` so it only fires after the load effect's setState calls have rendered.
   useEffect(() => {
     if (!hydrated) return;
-    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages };
+    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients };
     try { localStorage.setItem("hibp_data", JSON.stringify(data)); } catch {}
-  }, [hydrated, invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages]);
+  }, [hydrated, invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients]);
 
   // ── EXPORT / RELINK ──────────────────────────────────────────────────────────
   const exportData = () => {
-    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages };
+    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -699,6 +761,38 @@ export default function App() {
           localStorage.setItem(yFileKey, ym.id);
         }
       }
+      // Upload generated invoice HTML files to Drive (invoices subfolder per year)
+      const generatedToUpload = invoices.filter(i => i.generated && i.fileName && !i.driveInvoiceFileId);
+      if (generatedToUpload.length > 0) {
+        const invYearFolders = {};
+        const getInvYearFolder = async (year) => {
+          if (invYearFolders[year]) return invYearFolders[year];
+          const yFId = await getOrCreateYearFolder(rFolderId, year);
+          // get or create "invoices" subfolder under the year folder
+          const listRes = await drivePost({ action: "listFiles", q: `name='invoices' and mimeType='application/vnd.google-apps.folder' and '${yFId}' in parents and trashed=false` });
+          let invFId = listRes.files?.[0]?.id;
+          if (!invFId) {
+            const cd = await drivePost({ action: "createFolder", name: "invoices", parents: [yFId] });
+            invFId = cd.id;
+          }
+          invYearFolders[year] = invFId;
+          return invFId;
+        };
+        for (const inv of generatedToUpload) {
+          try {
+            const fileRes = await fetch(`/api/files?name=${encodeURIComponent(inv.fileName)}`);
+            if (!fileRes.ok) continue;
+            const buf = await fileRes.arrayBuffer();
+            const base64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+            const year = new Date(inv.date).getFullYear();
+            const invFolderId = await getInvYearFolder(isNaN(year) ? "misc" : year);
+            const m = await drivePost({ action: "uploadBinary", fileName: inv.fileName, fileBase64: base64, mimeType: "text/html", parents: [invFolderId] });
+            if (m.id) {
+              setInvoices(prev => prev.map(i => i.id === inv.id ? { ...i, driveInvoiceFileId: m.id } : i));
+            }
+          } catch (err) { console.warn("Invoice Drive upload failed:", err.message); }
+        }
+      }
       const now = new Date().toLocaleString();
       setLastSynced(now);
       localStorage.setItem("hibp_last_synced", now);
@@ -755,6 +849,7 @@ export default function App() {
   };
 
   const deleteJob = (id) => {
+    if (!window.confirm("Delete this job? Its entries will be unassigned but not deleted.")) return;
     setJobs(prev => prev.filter(j => j.id !== id));
     // unassign items from the deleted job
     setInvoices(prev => prev.map(i => i.jobId === id ? { ...i, jobId: "" } : i));
@@ -859,6 +954,9 @@ export default function App() {
   };
 
   const deleteInvoice = (id) => {
+    const inv = invoices.find(i => i.id === id);
+    if (inv?.locked) { alert("Unlock this entry before deleting it."); return; }
+    if (!window.confirm("Delete this invoice entry? This cannot be undone.")) return;
     URL.revokeObjectURL(blobCache.current.get(id)?.url);
     URL.revokeObjectURL(blobCache.current.get("paystub_" + id)?.url);
     blobCache.current.delete(id);
@@ -977,18 +1075,16 @@ export default function App() {
     const rate = parseFloat(newTimecard.rate);
     if (!newTimecard.company || isNaN(rate) || rate <= 0) return;
     const guarHours = parseFloat(newTimecard.guarHours) || 0;
-    const days = newTimecard.days.map(d => {
-      const actualHours = calcDayHours(d);
-      // Apply guaranteed minimum only on days the crew member actually worked
-      const paidHours = actualHours > 0 ? Math.max(actualHours, guarHours) : 0;
-      return { ...d, totalHours: actualHours, paidHours, ...calcOTBreakdown(paidHours) };
-    });
+    const days = applyWeekOTRules(newTimecard.days, guarHours);
     const hours = parseFloat(days.reduce((a, d) => a + (d.paidHours ?? d.totalHours), 0).toFixed(2));
     const mealPenaltyPay = parseFloat(days.reduce((a, d) => a + (d.mealPenalty ? rate : 0), 0).toFixed(2));
-    const total = parseFloat((days.reduce((a, d) => a + (d.hours1x * rate) + (d.hours15x * rate * 1.5) + (d.hours2x * rate * 2), 0) + mealPenaltyPay).toFixed(2));
-    setTimecards(prev => [{ id: crypto.randomUUID(), company: newTimecard.company, jobName: newTimecard.jobName, jobClassification: newTimecard.jobClassification, guarHours, hours, rate, total, mealPenaltyPay, date: newTimecard.weekEnding, days, description: newTimecard.description, status: "Unpaid", jobId: newTimecard.jobId || "", workerName: newTimecard.workerName || "", workerEmail: newTimecard.workerEmail || "", last4SS: newTimecard.last4SS || "", mileage: parseFloat(newTimecard.mileage) || 0, signatureName: newTimecard.workerName || "", signatureFont: newTimecard.signatureFont || "Dancing Script", signatureDate: newTimecard.signatureDate || "", locked: true, timestamp: Date.now() }, ...prev]);
+    const workPerDiem = parseFloat(newTimecard.workPerDiem) || 0;
+    const daysOffPerDiem = parseFloat(newTimecard.daysOffPerDiem) || 0;
+    const perDiemTotal = parseFloat(days.reduce((a, d) => a + (d.perDiemWork ? workPerDiem : 0) + (d.perDiemOff ? daysOffPerDiem : 0), 0).toFixed(2));
+    const total = parseFloat((days.reduce((a, d) => a + (d.hours1x * rate) + (d.hours15x * rate * 1.5) + (d.hours2x * rate * 2), 0) + mealPenaltyPay + perDiemTotal).toFixed(2));
+    setTimecards(prev => [{ id: crypto.randomUUID(), company: newTimecard.company, jobName: newTimecard.jobName, jobClassification: newTimecard.jobClassification, guarHours, hours, rate, total, mealPenaltyPay, workPerDiem, daysOffPerDiem, perDiemTotal, date: newTimecard.weekEnding, days, description: newTimecard.description, status: "Unpaid", jobId: newTimecard.jobId || "", workerName: newTimecard.workerName || "", workerEmail: newTimecard.workerEmail || "", last4SS: newTimecard.last4SS || "", mileage: parseFloat(newTimecard.mileage) || 0, signatureName: newTimecard.workerName || "", signatureFont: newTimecard.signatureFont || "Dancing Script", signatureDate: newTimecard.signatureDate || "", locked: true, timestamp: Date.now() }, ...prev]);
     if (newTimecard.jobId) setExpandedJobs(prev => { const n = new Set(prev); n.add(newTimecard.jobId); return n; });
-    setNewTimecard(p => { const we = p.weekEnding; return { company: "", jobName: "", jobClassification: "", guarHours: p.guarHours, rate: "", weekEnding: we, days: initWeekDays(we), description: "", jobId: p.jobId, workerName: p.workerName, workerEmail: p.workerEmail, last4SS: p.last4SS, mileage: "", signatureFont: p.signatureFont, signatureDate: new Date().toISOString().split("T")[0] }; });
+    setNewTimecard(p => { const we = p.weekEnding; return { company: "", jobName: "", jobClassification: "", guarHours: p.guarHours, rate: "", weekEnding: we, days: initWeekDays(we), description: "", jobId: p.jobId, workerName: p.workerName, workerEmail: p.workerEmail, last4SS: p.last4SS, mileage: "", workPerDiem: p.workPerDiem, daysOffPerDiem: p.daysOffPerDiem, signatureFont: p.signatureFont, signatureDate: new Date().toISOString().split("T")[0] }; });
   };
 
   const saveTimecardEdit = () => {
@@ -996,18 +1092,17 @@ export default function App() {
     const rate = parseFloat(editingTimecard.rate);
     if (!editingTimecard.company || isNaN(rate) || rate <= 0) return;
     const guarHours = parseFloat(editingTimecard.guarHours) || 0;
-    const days = editingTimecard.days.map(d => {
-      const actualHours = calcDayHours(d);
-      const paidHours = actualHours > 0 ? Math.max(actualHours, guarHours) : 0;
-      return { ...d, totalHours: actualHours, paidHours, ...calcOTBreakdown(paidHours) };
-    });
+    const days = applyWeekOTRules(editingTimecard.days, guarHours);
     const hours = parseFloat(days.reduce((a, d) => a + (d.paidHours ?? d.totalHours), 0).toFixed(2));
     const mealPenaltyPay = parseFloat(days.reduce((a, d) => a + (d.mealPenalty ? rate : 0), 0).toFixed(2));
-    const total = parseFloat((days.reduce((a, d) => a + (d.hours1x * rate) + (d.hours15x * rate * 1.5) + (d.hours2x * rate * 2), 0) + mealPenaltyPay).toFixed(2));
+    const workPerDiem = parseFloat(editingTimecard.workPerDiem) || 0;
+    const daysOffPerDiem = parseFloat(editingTimecard.daysOffPerDiem) || 0;
+    const perDiemTotal = parseFloat(days.reduce((a, d) => a + (d.perDiemWork ? workPerDiem : 0) + (d.perDiemOff ? daysOffPerDiem : 0), 0).toFixed(2));
+    const total = parseFloat((days.reduce((a, d) => a + (d.hours1x * rate) + (d.hours15x * rate * 1.5) + (d.hours2x * rate * 2), 0) + mealPenaltyPay + perDiemTotal).toFixed(2));
     setTimecards(prev => prev.map(tc => tc.id !== editingTimecard.id ? tc : {
       ...tc, company: editingTimecard.company, jobName: editingTimecard.jobName,
       jobClassification: editingTimecard.jobClassification, guarHours, rate, date: editingTimecard.weekEnding,
-      days, hours, total, mealPenaltyPay, description: editingTimecard.description, jobId: editingTimecard.jobId || "",
+      days, hours, total, mealPenaltyPay, workPerDiem, daysOffPerDiem, perDiemTotal, description: editingTimecard.description, jobId: editingTimecard.jobId || "",
       workerName: editingTimecard.workerName || "", workerEmail: editingTimecard.workerEmail || "", last4SS: editingTimecard.last4SS || "",
       signatureName: editingTimecard.workerName || "", signatureFont: editingTimecard.signatureFont || "Dancing Script", signatureDate: editingTimecard.signatureDate || "",
       mileage: parseFloat(editingTimecard.mileage) || 0,
@@ -1022,10 +1117,15 @@ export default function App() {
       const isWeekend = i === 0 || i === 6;
       const hasWork = d.totalHours > 0 || d.call;
       const paidH = d.paidHours ?? d.totalHours;
-      const guarApplied = d.paidHours != null && d.paidHours > d.totalHours;
       const rowBg = isWeekend ? "#fffbeb" : hasWork ? "#eff6ff" : "#ffffff";
       const otStr = d.hours2x > 0 ? `${d.hours2x}\u00d72 ` : d.hours15x > 0 ? `${d.hours15x}\u00d71.5` : d.totalHours > 0 ? "St" : "\u2014";
       const mpCell = d.mealPenalty ? `<span style='color:#c2410c;font-weight:bold;'>&#9888; Yes</span>` : `<span style='color:#cbd5e1;'>\u2014</span>`;
+      const rate = entry.rate || 0;
+      const dayPay = (d.hours1x || 0) * rate + (d.hours15x || 0) * rate * 1.5 + (d.hours2x || 0) * rate * 2 + (d.mealPenalty ? rate : 0);
+      const is6th = (() => { const idx = get6thDayIndex(days); return idx >= 0 && idx === i; })();
+      const dailyTotalCell = paidH > 0
+        ? `<span style="font-weight:bold;color:#166534;">$${dayPay.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>${is6th ? ` <span style="font-size:9px;color:#0e7490;font-weight:bold;">(6th day)</span>` : ""}`
+        : `<span style='color:#cbd5e1;'>\u2014</span>`;
       return `<tr style="background:${rowBg};border-bottom:1px solid #e2e8f0;">
         <td style="padding:5px 8px;font-weight:600;">${d.day} ${new Date(d.date + "T12:00").toLocaleDateString("en-US", { month: "numeric", day: "numeric" })}</td>
         <td style="padding:5px 8px;text-align:center;">${d.call || "\u2014"}</td>
@@ -1033,11 +1133,14 @@ export default function App() {
         <td style="padding:5px 8px;text-align:center;">${d.meal2Out && d.meal2In ? d.meal2Out + "\u2013" + d.meal2In : "\u2014"}</td>
         <td style="padding:5px 8px;text-align:center;">${d.wrap || "\u2014"}</td>
         <td style="padding:5px 8px;text-align:center;font-weight:bold;">${d.totalHours > 0 ? d.totalHours + "h" : "\u2014"}</td>
-        <td style="padding:5px 8px;text-align:center;font-weight:bold;">${paidH > 0 ? paidH + "h" : "\u2014"}${guarApplied ? " <span style='color:#b45309;font-size:9px;'>(guar)</span>" : ""}</td>
         <td style="padding:5px 8px;text-align:center;font-size:10px;">${otStr}</td>
         <td style="padding:5px 8px;text-align:center;font-size:10px;">${mpCell}</td>
+        <td style="padding:5px 8px;text-align:center;font-size:11px;">${dailyTotalCell}</td>
       </tr>`;
     }).join("");
+    const wageSubtotal = (entry.total || 0) - (entry.mealPenaltyPay || 0) - (entry.perDiemTotal || 0);
+    const perDiemWorkDays = entry.days.filter(d => d.perDiemWork).length;
+    const perDiemOffDays = entry.days.filter(d => d.perDiemOff).length;
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Timecard \u2013 ${entry.company}</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/><link href="https://fonts.googleapis.com/css2?family=Alex+Brush&family=Allura&family=Clicker+Script&family=Dancing+Script:wght@700&family=Great+Vibes&family=Italianno&family=Marck+Script&family=Pinyon+Script&family=Sacramento&family=Satisfy&family=Tangerine:wght@700&family=Yellowtail&display=swap" rel="stylesheet"/><style>body{font-family:Arial,sans-serif;margin:40px;font-size:12px;color:#1e293b;}table{width:100%;border-collapse:collapse;}th{background:#1e40af;color:#fff;padding:7px 8px;font-size:10px;text-transform:uppercase;text-align:center;}th:first-child{text-align:left;}tfoot td{background:#1e40af;color:#fff;font-weight:bold;padding:7px 8px;}@media print{body{margin:20px;}}</style></head><body>
 <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #1e40af;padding-bottom:12px;margin-bottom:16px;">
   <div><div style="font-size:9px;font-weight:bold;text-transform:uppercase;color:#64748b;letter-spacing:1px;">CREW TIME CARD</div><h1 style="margin:4px 0;font-size:20px;">${entry.company || ""}</h1>${entry.jobName ? `<div style="color:#2563eb;font-weight:600;font-size:13px;">${entry.jobName}</div>` : ""}</div>
@@ -1050,7 +1153,7 @@ export default function App() {
   ${entry.jobClassification ? `<div><div style="font-size:9px;font-weight:bold;text-transform:uppercase;color:#64748b;">Classification</div><div style="font-size:13px;font-weight:600;">${entry.jobClassification}</div></div>` : ""}
   ${entry.rate > 0 ? `<div><div style="font-size:9px;font-weight:bold;text-transform:uppercase;color:#64748b;">Rate</div><div style="font-size:13px;font-weight:600;">$${entry.rate}/hr</div></div>` : ""}
 </div>
-<table><thead><tr><th>Day</th><th>Call</th><th>Meal 1</th><th>Meal 2</th><th>Wrap</th><th>Hrs Worked</th><th>Hrs Paid</th><th>OT</th><th>Meal Penalty</th></tr></thead><tbody>${rowsHtml}</tbody><tfoot><tr><td colspan="5" style="text-align:left;">WEEK TOTAL (Hours)</td><td style="text-align:center;">${entry.hours}h</td><td colspan="2" style="text-align:center;">$${(entry.total - (entry.mealPenaltyPay || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td><td style="text-align:center;">${(entry.days?.filter(d => d.mealPenalty).length || 0) > 0 ? entry.days.filter(d => d.mealPenalty).length + " day(s)" : "\u2014"}</td></tr>${(entry.mealPenaltyPay || 0) > 0 ? `<tr><td colspan="5" style="text-align:left;">Meal Penalty (${entry.days.filter(d => d.mealPenalty).length} day${entry.days.filter(d => d.mealPenalty).length !== 1 ? "s" : ""} \u00d7 1hr base)</td><td colspan="3" style="text-align:center;">$${(entry.mealPenaltyPay).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td><td></td></tr><tr><td colspan="5" style="text-align:left;font-size:13px;">TOTAL DUE</td><td colspan="3" style="text-align:center;font-size:13px;">$${(entry.total || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td><td></td></tr>` : ""}</tfoot></table>
+<table><thead><tr><th>Day</th><th>Call</th><th>Meal 1</th><th>Meal 2</th><th>Wrap</th><th>Hrs Worked</th><th>OT</th><th>Meal Penalty</th><th>Daily Total</th></tr></thead><tbody>${rowsHtml}</tbody><tfoot><tr><td colspan="5" style="text-align:left;">WEEK TOTAL (Wages)</td><td style="text-align:center;">${entry.hours}h</td><td colspan="2" style="text-align:center;">&nbsp;</td><td style="text-align:center;font-weight:bold;">$${wageSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>${perDiemWorkDays > 0 ? `<tr><td colspan="5" style="text-align:left;">Per Diem \u2014 Work Days (${perDiemWorkDays} day${perDiemWorkDays !== 1 ? "s" : ""} \u00d7 $${(entry.workPerDiem || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}/day)</td><td colspan="3" style="text-align:center;">&nbsp;</td><td style="text-align:center;">$${((entry.workPerDiem || 0) * perDiemWorkDays).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>` : ""}${perDiemOffDays > 0 ? `<tr><td colspan="5" style="text-align:left;">Per Diem \u2014 Days Off (${perDiemOffDays} day${perDiemOffDays !== 1 ? "s" : ""} \u00d7 $${(entry.daysOffPerDiem || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}/day)</td><td colspan="3" style="text-align:center;">&nbsp;</td><td style="text-align:center;">$${((entry.daysOffPerDiem || 0) * perDiemOffDays).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>` : ""}${(entry.mealPenaltyPay || 0) > 0 ? `<tr><td colspan="5" style="text-align:left;">Meal Penalty (${entry.days.filter(d => d.mealPenalty).length} day${entry.days.filter(d => d.mealPenalty).length !== 1 ? "s" : ""} \u00d7 1hr base)</td><td colspan="3" style="text-align:center;">&nbsp;</td><td style="text-align:center;">$${(entry.mealPenaltyPay).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>` : ""}${((entry.mealPenaltyPay || 0) > 0 || (entry.perDiemTotal || 0) > 0) ? `<tr><td colspan="5" style="text-align:left;font-size:13px;">TOTAL DUE</td><td colspan="3" style="text-align:center;">&nbsp;</td><td style="text-align:center;font-size:13px;">$${(entry.total || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>` : ""}</tfoot></table>
 ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;"><strong>Notes:</strong> ${entry.description}</div>` : ""}
 <div style="margin-top:36px;border-top:1px solid #cbd5e1;padding-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:40px;">
   <div>
@@ -1070,6 +1173,9 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
     setTimeout(() => w.print(), 400);
   };
   const deleteTimecard = (id) => {
+    const tc = timecards.find(t => t.id === id);
+    if (tc?.locked) { alert("Unlock this entry before deleting it."); return; }
+    if (!window.confirm("Delete this timecard? This cannot be undone.")) return;
     URL.revokeObjectURL(blobCache.current.get(id)?.url);
     URL.revokeObjectURL(blobCache.current.get("tc_paystub_" + id)?.url);
     blobCache.current.delete(id);
@@ -1077,7 +1183,314 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
     setTimecards(prev => prev.filter(t => t.id !== id));
   };
 
-  // ── TIMECARD PAYSTUB UPLOAD ──────────────────────────────────────────────────
+  // ── INVOICE GENERATOR ───────────────────────────────────────────────────────
+  const openInvoiceGenerator = () => {
+    const today = new Date().toISOString().split("T")[0];
+    const dueD = new Date(); dueD.setDate(dueD.getDate() + 30);
+    const y = new Date().getFullYear(), mo = String(new Date().getMonth() + 1).padStart(2, "0"), dy = String(new Date().getDate()).padStart(2, "0");
+    const num = `INV-${y}${mo}${dy}-001`;
+    let profile = {};
+    try { profile = JSON.parse(localStorage.getItem("hibp_sender_profile") || "{}"); } catch {}
+    setInvoiceForm({
+      senderName: profile.senderName || "",
+      senderAddress: profile.senderAddress || "",
+      senderCity: profile.senderCity || "",
+      senderState: profile.senderState || "",
+      senderZip: profile.senderZip || "",
+      senderPhone: profile.senderPhone || "",
+      senderEmail: profile.senderEmail || "",
+      clientName: "",
+      clientAddress: "",
+      clientCity: "",
+      clientState: "",
+      clientZip: "",
+      invoiceNumber: num,
+      invoiceDate: today,
+      dueDate: dueD.toISOString().split("T")[0],
+      jobName: "",
+      jobId: "",
+      lineItems: [{ id: crypto.randomUUID(), description: "", qty: "1", rate: "", amount: 0 }],
+      paymentMethod: profile.paymentMethod || "ACH",
+      bankName: profile.bankName || "",
+      routingNumber: profile.routingNumber || "",
+      accountNumber: profile.accountNumber || "",
+      paypalHandle: profile.paypalHandle || "",
+      zelleHandle: profile.zelleHandle || "",
+      venmoHandle: profile.venmoHandle || "",
+      checkPayableTo: profile.checkPayableTo || "",
+      notes: "",
+      taxRate: "",
+    });
+    setShowInvoiceGenerator(true);
+  };
+
+  const updateLineItem = (id, field, val) => {
+    setInvoiceForm(prev => {
+      const items = prev.lineItems.map(li => {
+        if (li.id !== id) return li;
+        const updated = { ...li, [field]: val };
+        if (field === "qty" || field === "rate") {
+          updated.amount = parseFloat(updated.qty || 0) * parseFloat(updated.rate || 0);
+        }
+        return updated;
+      });
+      return { ...prev, lineItems: items };
+    });
+  };
+
+  const downloadInvoicePDF = async (form, saveEntry = false) => {
+    const fmt = n => (parseFloat(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2 });
+    const fmtDate = s => { if (!s) return ""; const d = new Date(s + "T12:00"); return isNaN(d) ? s : d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }); };
+    const subtotal = form.lineItems.reduce((a, li) => a + (parseFloat(li.amount) || 0), 0);
+    const taxAmt = subtotal * ((parseFloat(form.taxRate) || 0) / 100);
+    const total = subtotal + taxAmt;
+    const rows = form.lineItems.map(li => `
+      <tr>
+        <td style="padding:9px 12px;border-bottom:1px solid #daf2f7;">${li.description || ""}</td>
+        <td style="padding:9px 12px;text-align:center;border-bottom:1px solid #daf2f7;">${li.qty || ""}</td>
+        <td style="padding:9px 12px;text-align:right;border-bottom:1px solid #daf2f7;">${li.rate ? "$" + fmt(li.rate) : ""}</td>
+        <td style="padding:9px 12px;text-align:right;border-bottom:1px solid #daf2f7;font-weight:600;">${(parseFloat(li.amount) || 0) > 0 ? "$" + fmt(li.amount) : ""}</td>
+      </tr>`).join("");
+    const blankRows = Array.from({ length: Math.max(0, 7 - form.lineItems.length) }, () => `
+      <tr>
+        <td style="padding:9px 12px;border-bottom:1px solid #daf2f7;">&nbsp;</td>
+        <td style="padding:9px 12px;border-bottom:1px solid #daf2f7;"></td>
+        <td style="padding:9px 12px;border-bottom:1px solid #daf2f7;"></td>
+        <td style="padding:9px 12px;border-bottom:1px solid #daf2f7;"></td>
+      </tr>`).join("");
+
+    const html = `<!DOCTYPE html>
+<html><head>
+  <meta charset="utf-8"/>
+  <title>Invoice ${form.invoiceNumber || ""}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Century Gothic', 'Trebuchet MS', 'Gill Sans', Arial, sans-serif; font-size: 11px; color: #111; background: #fff; padding: 36px 40px; }
+    .top-bar { background: #111; height: 8px; border-radius: 2px 2px 0 0; }
+    .header { display: grid; grid-template-columns: 1fr auto; border: 1px solid #9ee7f5; border-top: none; }
+    .sender-block { background: #cff4fc; padding: 16px 18px; }
+    .invoice-block { padding: 16px 18px; text-align: right; display: flex; flex-direction: column; justify-content: center; align-items: flex-end; border-left: 1px solid #9ee7f5; min-width: 160px; background: #fff; }
+    .invoice-title { font-size: 24px; font-weight: bold; letter-spacing: 3px; }
+    .invoice-num { font-size: 10px; color: #444; margin-top: 3px; font-family: monospace; }
+    .lbl { font-size: 8.5px; color: #555; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 1px; }
+    .val { font-size: 11px; color: #111; line-height: 1.4; }
+    .sec-hdr { background: #cff4fc; border: 1px solid #9ee7f5; border-top: none; display: grid; grid-template-columns: 1fr 1fr; }
+    .sec-hdr-cell { padding: 4px 12px; font-size: 8.5px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }
+    .sec-hdr-cell:first-child { border-right: 1px solid #9ee7f5; }
+    .cj-grid { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid #9ee7f5; border-top: none; }
+    .cj-col { padding: 10px 12px; }
+    .cj-col:first-child { border-right: 1px solid #9ee7f5; }
+    table.items { width: 100%; border-collapse: collapse; border: 1px solid #9ee7f5; border-top: none; }
+    table.items thead th { background: #cff4fc; padding: 6px 12px; font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #9ee7f5; font-weight: bold; }
+    table.items thead th:not(:first-child) { text-align: right; }
+    table.items thead th:nth-child(2) { text-align: center; width: 80px; }
+    table.items thead th:nth-child(3) { width: 110px; }
+    table.items thead th:nth-child(4) { width: 110px; }
+    .totals-grid { display: grid; grid-template-columns: 1fr 220px; border: 1px solid #9ee7f5; border-top: none; }
+    .notes-cell { padding: 10px 12px; font-size: 10px; color: #555; border-right: 1px solid #9ee7f5; }
+    .tr-row { display: flex; justify-content: space-between; padding: 5px 12px; border-bottom: 1px solid #e8f9fc; font-size: 11px; }
+    .tr-row.grand { background: #cff4fc; font-weight: bold; font-size: 13px; border-bottom: none; }
+    .payment-block { border: 1px solid #9ee7f5; border-top: none; }
+    .payment-hdr { background: #cff4fc; padding: 4px 12px; font-size: 8.5px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #9ee7f5; }
+    .payment-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; padding: 10px 12px; }
+    .footer-bar { border: 1px solid #9ee7f5; border-top: none; text-align: center; padding: 7px; font-size: 10px; color: #666; background: #f8fefe; }
+    @media print { body { padding: 10px; } }
+  </style>
+</head><body>
+<div class="top-bar"></div>
+<div class="header">
+  <div class="sender-block">
+    <div class="lbl">Name</div><div class="val" style="font-weight:600;">${form.senderName || "&nbsp;"}</div>
+    ${(form.senderAddress || form.senderCity) ? `<div class="lbl" style="margin-top:6px;">Address</div>${form.senderAddress ? `<div class="val">${form.senderAddress}</div>` : ""}${(form.senderCity || form.senderState || form.senderZip) ? `<div class="val">${[form.senderCity, form.senderState, form.senderZip].filter(Boolean).join(", ")}</div>` : ""}` : ""}
+    <div style="display:flex;gap:24px;margin-top:6px;">
+      ${form.senderPhone ? `<div><div class="lbl">Phone</div><div class="val">${form.senderPhone}</div></div>` : ""}
+      ${form.senderEmail ? `<div><div class="lbl">Email</div><div class="val">${form.senderEmail}</div></div>` : ""}
+    </div>
+  </div>
+  <div class="invoice-block">
+    <div class="invoice-title">INVOICE</div>
+    ${form.invoiceNumber ? `<div class="invoice-num">#${form.invoiceNumber}</div>` : ""}
+  </div>
+</div>
+<div class="sec-hdr">
+  <div class="sec-hdr-cell">Customer</div>
+  <div class="sec-hdr-cell">Job</div>
+</div>
+<div class="cj-grid">
+  <div class="cj-col">
+    <div class="lbl">Name</div><div class="val" style="font-weight:600;">${form.clientName || "&nbsp;"}</div>
+    ${(form.clientAddress || form.clientCity) ? `<div class="lbl" style="margin-top:5px;">Address</div>${form.clientAddress ? `<div class="val">${form.clientAddress}</div>` : ""}${(form.clientCity || form.clientState || form.clientZip) ? `<div class="val">${[form.clientCity, form.clientState, form.clientZip].filter(Boolean).join(", ")}</div>` : ""}` : ""}
+  </div>
+  <div class="cj-col">
+    <div class="lbl">Date Submitted</div><div class="val">${fmtDate(form.invoiceDate)}</div>
+    <div class="lbl" style="margin-top:5px;">Due Date</div><div class="val" style="font-weight:600;">${fmtDate(form.dueDate)}</div>
+    ${form.jobName ? `<div class="lbl" style="margin-top:5px;">Job / Show</div><div class="val">${form.jobName}</div>` : ""}
+  </div>
+</div>
+<table class="items">
+  <thead>
+    <tr>
+      <th style="text-align:left;">Description</th>
+      <th>Qty / Hrs</th>
+      <th>Rate</th>
+      <th>Amount</th>
+    </tr>
+  </thead>
+  <tbody>${rows}${blankRows}</tbody>
+</table>
+<div class="totals-grid">
+  <div class="notes-cell">${form.notes ? `<strong>Notes:</strong><br/>${form.notes}` : `<span style="color:#ccc;">Notes / Comments</span>`}</div>
+  <div>
+    <div class="tr-row"><span>Subtotal</span><span>$${fmt(subtotal)}</span></div>
+    ${taxAmt > 0 ? `<div class="tr-row"><span>Tax (${form.taxRate}%)</span><span>$${fmt(taxAmt)}</span></div>` : ""}
+    <div class="tr-row grand"><span>TOTAL</span><span>$${fmt(total)}</span></div>
+  </div>
+</div>
+<div class="payment-block">
+  <div class="payment-hdr">Payment Method: ${form.paymentMethod || "ACH"}</div>
+  <div class="payment-grid">
+    ${form.paymentMethod === "ACH" || !form.paymentMethod ? `
+      <div><div class="lbl">Bank Name</div><div class="val">${form.bankName || "\u2014"}</div></div>
+      <div><div class="lbl">Routing Number</div><div class="val" style="font-family:monospace;">${form.routingNumber || "\u2014"}</div></div>
+      <div><div class="lbl">Account Number</div><div class="val" style="font-family:monospace;">${form.accountNumber || "\u2014"}</div></div>` : ""}
+    ${form.paymentMethod === "PayPal" ? `<div style="grid-column:1/-1"><div class="lbl">PayPal Email / Username</div><div class="val">${form.paypalHandle || "\u2014"}</div></div>` : ""}
+    ${form.paymentMethod === "Zelle" ? `<div style="grid-column:1/-1"><div class="lbl">Zelle Phone / Email</div><div class="val">${form.zelleHandle || "\u2014"}</div></div>` : ""}
+    ${form.paymentMethod === "Venmo" ? `<div style="grid-column:1/-1"><div class="lbl">Venmo Username</div><div class="val">${form.venmoHandle || "\u2014"}</div></div>` : ""}
+    ${form.paymentMethod === "Check" ? `<div style="grid-column:1/-1"><div class="lbl">Make Check Payable To</div><div class="val" style="font-weight:600;">${form.checkPayableTo || "\u2014"}</div></div>` : ""}
+  </div>
+</div>
+<div class="footer-bar">Thank you for your business!</div>
+</body></html>`;
+
+    // Persist sender profile for next time
+    try { localStorage.setItem("hibp_sender_profile", JSON.stringify({ senderName: form.senderName, senderAddress: form.senderAddress, senderCity: form.senderCity, senderState: form.senderState, senderZip: form.senderZip, senderPhone: form.senderPhone, senderEmail: form.senderEmail, paymentMethod: form.paymentMethod, bankName: form.bankName, routingNumber: form.routingNumber, accountNumber: form.accountNumber, paypalHandle: form.paypalHandle, zelleHandle: form.zelleHandle, venmoHandle: form.venmoHandle, checkPayableTo: form.checkPayableTo })); } catch {}
+
+    if (saveEntry) {
+      const invId = crypto.randomUUID();
+      const safeNum = (form.invoiceNumber || invId.slice(0, 8)).replace(/[^a-zA-Z0-9_\-]/g, "_");
+      const htmlFileName = `invoice_${safeNum}.html`;
+      let savedFileName = null;
+      try {
+        const blob = new Blob([html], { type: "text/html" });
+        const htmlFile = new File([blob], htmlFileName, { type: "text/html" });
+        const fd = new FormData();
+        fd.append("file", htmlFile);
+        fd.append("subfolder", "invoices");
+        const res = await fetch("/api/files", { method: "POST", body: fd });
+        if (res.ok) savedFileName = htmlFileName;
+      } catch (err) { console.warn("Invoice file save error:", err.message); }
+      setInvoices(prev => [{
+        id: invId, fileId: null, fileName: savedFileName, fileType: savedFileName ? "text/html" : null,
+        company: form.clientName || "", amount: total, date: form.invoiceDate,
+        invoiceNumber: form.invoiceNumber || "", status: "Unpaid",
+        jobId: form.jobId || "", dueDate: form.dueDate,
+        generated: true, generatedData: form, timestamp: Date.now(),
+      }, ...prev]);
+      if (form.jobId) setExpandedJobs(prev => { const n = new Set(prev); n.add(form.jobId); return n; });
+    }
+
+    const w = window.open("", "_blank");
+    if (!w) { alert("Please allow pop-ups for this site to print the invoice."); return; }
+    w.document.write(html);
+    w.document.close();
+    setTimeout(() => w.print(), 400);
+  };
+  // ── MILEAGE TAX REPORT ───────────────────────────────────────────────────────
+  const generateMileageReport = () => {
+    const entries = allMileageEntries.slice().sort((a, b) => a.date.localeCompare(b.date));
+    if (entries.length === 0) { alert("No mileage entries for " + selectedYear + "."); return; }
+    let profile = {};
+    try { profile = JSON.parse(localStorage.getItem("hibp_sender_profile") || "{}"); } catch {}
+    const ownerName = profile.senderName || "";
+    const rate = IRS_MILEAGE_RATE;
+    const totalMi = entries.reduce((a, b) => a + (parseFloat(b.miles) || 0), 0);
+    const totalVal = totalMi * rate;
+
+    // Group totals by company
+    const byCompany = {};
+    entries.forEach(m => {
+      const co = m.company || "(unspecified)";
+      if (!byCompany[co]) byCompany[co] = { miles: 0 };
+      byCompany[co].miles += parseFloat(m.miles) || 0;
+    });
+
+    const fmtDate = (d) => { if (!d) return ""; try { return new Date(d + "T12:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { return d; } };
+
+    const rows = entries.map(m => `
+      <tr>
+        <td>${fmtDate(m.date)}</td>
+        <td>${m.source === "timecard" ? "<span class=\"badge tc\">Timecard</span>" : "<span class=\"badge mn\">Manual</span>"}</td>
+        <td>${m.company || "\u2014"}</td>
+        <td>${m.jobName || (m.jobId && jobs ? (jobs.find ? "" : "") : "") || "\u2014"}</td>
+        <td>${m.purpose || "\u2014"}</td>
+        <td>${m.vehicle || "\u2014"}</td>
+        <td class="num">${(parseFloat(m.miles) || 0).toLocaleString(undefined, { minimumFractionDigits: 1 })}</td>
+        <td class="num">$${((parseFloat(m.miles) || 0) * rate).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+      </tr>`).join("");
+
+    const summaryRows = Object.entries(byCompany).sort((a, b) => b[1].miles - a[1].miles).map(([co, data]) => `
+      <tr>
+        <td>${co}</td>
+        <td class="num">${data.miles.toLocaleString(undefined, { minimumFractionDigits: 1 })} mi</td>
+        <td class="num">$${(data.miles * rate).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+      </tr>`).join("");
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8" />
+<title>Mileage Log ${selectedYear}</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Century Gothic', 'Gill Sans', Arial, sans-serif; font-size: 11px; color: #222; padding: 28px 32px; }
+  h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 2px; }
+  .sub { font-size: 11px; color: #666; margin-bottom: 18px; }
+  .section-title { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: #fff; background: #0e7490; padding: 4px 10px; margin-bottom: 0; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+  th { background: #cff4fc; font-size: 8.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; padding: 5px 8px; border: 1px solid #9ee7f5; text-align: left; }
+  td { padding: 4px 8px; border: 1px solid #e2e8f0; font-size: 10.5px; vertical-align: middle; }
+  tr:nth-child(even) td { background: #f8fefe; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .badge { font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; padding: 1px 5px; border-radius: 3px; }
+  .tc { background: #dbeafe; color: #1d4ed8; }
+  .mn { background: #d1fae5; color: #065f46; }
+  .total-row td { font-weight: 700; background: #cff4fc !important; border-top: 2px solid #9ee7f5; }
+  .footer { margin-top: 24px; border-top: 1px solid #e2e8f0; padding-top: 10px; font-size: 9px; color: #888; }
+  @media print { body { padding: 10px; } }
+</style></head><body>
+<h1>Mileage Log &mdash; ${selectedYear} Tax Year</h1>
+<p class="sub">${ownerName ? ownerName + " &nbsp;&bull;&nbsp; " : ""}IRS Standard Mileage Rate: $${rate}/mi &nbsp;&bull;&nbsp; Generated ${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}</p>
+
+<div class="section-title">All Entries (${entries.length})</div>
+<table>
+  <thead><tr>
+    <th>Date</th><th>Type</th><th>Client / Company</th><th>Job / Show</th><th>Purpose</th><th>Vehicle</th><th class="num">Miles</th><th class="num">Deduction</th>
+  </tr></thead>
+  <tbody>
+    ${rows}
+    <tr class="total-row">
+      <td colspan="6">TOTAL</td>
+      <td class="num">${totalMi.toLocaleString(undefined, { minimumFractionDigits: 1 })} mi</td>
+      <td class="num">$${totalVal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="section-title">Summary by Client / Company</div>
+<table>
+  <thead><tr><th>Client / Company</th><th class="num">Total Miles</th><th class="num">Deduction Value</th></tr></thead>
+  <tbody>
+    ${summaryRows}
+    <tr class="total-row"><td>GRAND TOTAL</td><td class="num">${totalMi.toLocaleString(undefined, { minimumFractionDigits: 1 })} mi</td><td class="num">$${totalVal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>
+  </tbody>
+</table>
+
+<div class="footer">* Based on IRS standard mileage rate of $${rate}/mi for ${selectedYear}. Consult a tax professional for filing. This report was generated by Have I Been Paid?</div>
+</body></html>`;
+
+    const w = window.open("", "_blank");
+    if (!w) { alert("Please allow pop-ups to print the report."); return; }
+    w.document.write(html);
+    w.document.close();
+    setTimeout(() => w.print(), 400);
+  };
   const handleTimecardPaystubUpload = async (timecardId, file) => {
     if (!file) return;
     setPaystubUploading(timecardId);
@@ -1215,6 +1628,9 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
   };
 
   const deletePurchase = (id) => {
+    const pur = purchases.find(p => p.id === id);
+    if (pur?.locked) { alert("Unlock this entry before deleting it."); return; }
+    if (!window.confirm("Delete this purchase entry? This cannot be undone.")) return;
     URL.revokeObjectURL(blobCache.current.get("receipt_" + id)?.url);
     blobCache.current.delete("receipt_" + id);
     setPurchases(prev => prev.filter(p => p.id !== id));
@@ -1433,7 +1849,9 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                 )
               ) : previewItem.fileName ? (
                 // Local file — served from offline_files/ folder
-                previewItem.fileType?.startsWith("image/") ? (
+                previewItem.fileType === "text/html" ? (
+                  <iframe src={`/api/files?name=${encodeURIComponent(previewItem.fileName)}`} className="w-full border-0" style={{ minHeight: "70vh" }} title="Invoice Preview" />
+                ) : previewItem.fileType?.startsWith("image/") ? (
                   <img src={`/api/files?name=${encodeURIComponent(previewItem.fileName)}`} alt="Document" className="max-w-full h-auto mx-auto block p-4" />
                 ) : (
                   <object data={`/api/files?name=${encodeURIComponent(previewItem.fileName)}`} type="application/pdf" className="w-full h-full border-0" style={{ minHeight: "70vh" }}>
@@ -1449,6 +1867,19 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                     <a href={`/api/drive?action=proxy&id=${previewItem.fileId}`} download={previewItem.fileName} className="block p-8 text-center text-blue-600 underline">Download file</a>
                   </object>
                 )
+              ) : (previewItem.generated && previewItem.generatedData) ? (
+                // Regenerate HTML on the fly from saved data (fallback for older entries)
+                (() => {
+                  const f = previewItem.generatedData;
+                  const fmt = n => (parseFloat(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2 });
+                  const fmtDate = s => { if (!s) return ""; const d = new Date(s + "T12:00"); return isNaN(d) ? s : d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }); };
+                  const subtotal = f.lineItems.reduce((a, li) => a + (parseFloat(li.amount) || 0), 0);
+                  const taxAmt = subtotal * ((parseFloat(f.taxRate) || 0) / 100);
+                  const total = subtotal + taxAmt;
+                  const rows = f.lineItems.map(li => `<tr><td style="padding:9px 12px;border-bottom:1px solid #daf2f7;">${li.description || ""}</td><td style="padding:9px 12px;text-align:center;border-bottom:1px solid #daf2f7;">${li.qty || ""}</td><td style="padding:9px 12px;text-align:right;border-bottom:1px solid #daf2f7;">${li.rate ? "$" + fmt(li.rate) : ""}</td><td style="padding:9px 12px;text-align:right;border-bottom:1px solid #daf2f7;font-weight:600;">${(parseFloat(li.amount) || 0) > 0 ? "$" + fmt(li.amount) : ""}</td></tr>`).join("");
+                  const srcDoc = `<!DOCTYPE html><html><head><meta charset="utf-8"/><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:'Century Gothic','Trebuchet MS',Arial,sans-serif;font-size:11px;color:#111;background:#fff;padding:36px 40px;}.top-bar{background:#111;height:8px;border-radius:2px 2px 0 0;}.header{display:grid;grid-template-columns:1fr auto;border:1px solid #9ee7f5;border-top:none;}.sender-block{background:#cff4fc;padding:16px 18px;}.invoice-block{padding:16px 18px;text-align:right;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;border-left:1px solid #9ee7f5;min-width:160px;background:#fff;}.invoice-title{font-size:24px;font-weight:bold;letter-spacing:3px;}.lbl{font-size:8.5px;color:#555;text-transform:uppercase;letter-spacing:0.4px;margin-bottom:1px;}.val{font-size:11px;color:#111;line-height:1.4;}.sec-hdr{background:#cff4fc;border:1px solid #9ee7f5;border-top:none;display:grid;grid-template-columns:1fr 1fr;}.sec-hdr-cell{padding:4px 12px;font-size:8.5px;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;}.sec-hdr-cell:first-child{border-right:1px solid #9ee7f5;}.cj-grid{display:grid;grid-template-columns:1fr 1fr;border:1px solid #9ee7f5;border-top:none;}.cj-col{padding:10px 12px;}.cj-col:first-child{border-right:1px solid #9ee7f5;}table.items{width:100%;border-collapse:collapse;border:1px solid #9ee7f5;border-top:none;}table.items thead th{background:#cff4fc;padding:6px 12px;font-size:8.5px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #9ee7f5;font-weight:bold;}table.items thead th:not(:first-child){text-align:right;}table.items thead th:nth-child(2){text-align:center;width:80px;}table.items thead th:nth-child(3){width:110px;}table.items thead th:nth-child(4){width:110px;}.totals-grid{display:grid;grid-template-columns:1fr 220px;border:1px solid #9ee7f5;border-top:none;}.notes-cell{padding:10px 12px;font-size:10px;color:#555;border-right:1px solid #9ee7f5;}.tr-row{display:flex;justify-content:space-between;padding:5px 12px;border-bottom:1px solid #e8f9fc;font-size:11px;}.tr-row.grand{background:#cff4fc;font-weight:bold;font-size:13px;border-bottom:none;}.payment-block{border:1px solid #9ee7f5;border-top:none;}.payment-hdr{background:#cff4fc;padding:4px 12px;font-size:8.5px;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #9ee7f5;}.payment-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:10px 12px;}.footer-bar{border:1px solid #9ee7f5;border-top:none;text-align:center;padding:7px;font-size:10px;color:#666;background:#f8fefe;}</style></head><body><div class="top-bar"></div><div class="header"><div class="sender-block"><div class="lbl">Name</div><div class="val" style="font-weight:600;">${f.senderName||""}</div>${f.senderAddress?`<div class="lbl" style="margin-top:6px;">Address</div><div class="val">${f.senderAddress}</div>`:""}<div class="val">${[f.senderCity,f.senderState,f.senderZip].filter(Boolean).join(", ")}</div></div><div class="invoice-block"><div class="invoice-title">INVOICE</div><div class="lbl" style="margin-top:6px;">Invoice #</div><div class="val" style="font-family:monospace;">${f.invoiceNumber||""}</div><div class="lbl" style="margin-top:4px;">Date</div><div class="val">${fmtDate(f.invoiceDate)}</div>${f.dueDate?`<div class="lbl" style="margin-top:4px;">Due</div><div class="val">${fmtDate(f.dueDate)}</div>`:""}</div></div><div class="sec-hdr"><div class="sec-hdr-cell">Bill To</div><div class="sec-hdr-cell">Job / Project</div></div><div class="cj-grid"><div class="cj-col"><div class="val" style="font-weight:600;">${f.clientName||""}</div>${f.clientAddress?`<div class="val">${f.clientAddress}</div>`:""}<div class="val">${[f.clientCity,f.clientState,f.clientZip].filter(Boolean).join(", ")}</div>${f.clientEmail?`<div class="val">${f.clientEmail}</div>`:""}</div><div class="cj-col"><div class="val" style="font-weight:600;">${f.jobName||""}</div>${f.jobDescription?`<div class="val" style="color:#555;margin-top:3px;">${f.jobDescription}</div>`:""}</div></div><table class="items"><thead><tr><th style="text-align:left;">Description</th><th>Qty / Hrs</th><th>Rate</th><th>Amount</th></tr></thead><tbody>${rows}</tbody></table><div class="totals-grid"><div class="notes-cell">${f.notes?`<strong>Notes:</strong><br/>${f.notes}`:`<span style="color:#ccc;">Notes / Comments</span>`}</div><div><div class="tr-row"><span>Subtotal</span><span>$${fmt(subtotal)}</span></div>${taxAmt>0?`<div class="tr-row"><span>Tax (${f.taxRate}%)</span><span>$${fmt(taxAmt)}</span></div>`:""}<div class="tr-row grand"><span>TOTAL</span><span>$${fmt(total)}</span></div></div></div><div class="payment-block"><div class="payment-hdr">Payment Method: ${f.paymentMethod||"ACH"}</div><div class="payment-grid">${f.paymentMethod==="ACH"||!f.paymentMethod?`<div><div class="lbl">Bank Name</div><div class="val">${f.bankName||"—"}</div></div><div><div class="lbl">Routing</div><div class="val" style="font-family:monospace;">${f.routingNumber||"—"}</div></div><div><div class="lbl">Account</div><div class="val" style="font-family:monospace;">${f.accountNumber||"—"}</div></div>`:""}${f.paymentMethod==="Check"?`<div style="grid-column:1/-1"><div class="lbl">Make Check Payable To</div><div class="val" style="font-weight:600;">${f.checkPayableTo||"—"}</div></div>`:""}</div></div><div class="footer-bar">Thank you for your business!</div></body></html>`;
+                  return <iframe srcDoc={srcDoc} className="w-full border-0" style={{ minHeight: "70vh" }} title="Invoice Preview" />;
+                })()
               ) : (
                 <div className="flex flex-col items-center justify-center h-full gap-3 p-10 text-slate-400">
                   <FileText size={40} />
@@ -1473,7 +1904,22 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
                 <div className="space-y-1 col-span-2 sm:col-span-3 lg:col-span-2">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Production Company *</label>
+                  {clients.length > 0 && (
+                    <select value="" onChange={e => { if (e.target.value) setEditingTimecard(p => ({ ...p, company: e.target.value })); }}
+                      className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 mb-1">
+                      <option value="">— Saved client —</option>
+                      {clients.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                    </select>
+                  )}
                   <Input value={editingTimecard.company} onChange={e => setEditingTimecard(p => ({ ...p, company: e.target.value }))} placeholder="e.g. KISSD Honda" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Job</label>
+                  <select value={editingTimecard.jobId || ""} onChange={e => setEditingTimecard(p => ({ ...p, jobId: e.target.value }))}
+                    className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                    <option value="">— Unassigned —</option>
+                    {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
+                  </select>
                 </div>
                 <div className="space-y-1 col-span-2 sm:col-span-3 lg:col-span-2">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Job Name / Show</label>
@@ -1517,16 +1963,16 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                   <Input type="number" value={editingTimecard.mileage || ""} onChange={e => setEditingTimecard(p => ({ ...p, mileage: e.target.value }))} placeholder="0" />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Notes</label>
-                  <Input value={editingTimecard.description || ""} onChange={e => setEditingTimecard(p => ({ ...p, description: e.target.value }))} />
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Work Day Per Diem ($)</label>
+                  <Input type="number" value={editingTimecard.workPerDiem || ""} onChange={e => setEditingTimecard(p => ({ ...p, workPerDiem: e.target.value }))} placeholder="0" />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Job</label>
-                  <select value={editingTimecard.jobId || ""} onChange={e => setEditingTimecard(p => ({ ...p, jobId: e.target.value }))}
-                    className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
-                    <option value="">— Unassigned —</option>
-                    {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
-                  </select>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Day Off Per Diem ($)</label>
+                  <Input type="number" value={editingTimecard.daysOffPerDiem || ""} onChange={e => setEditingTimecard(p => ({ ...p, daysOffPerDiem: e.target.value }))} placeholder="0" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Notes</label>
+                  <Input value={editingTimecard.description || ""} onChange={e => setEditingTimecard(p => ({ ...p, description: e.target.value }))} />
                 </div>
                 <div className="space-y-1 col-span-2">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Your Name</label>
@@ -1616,7 +2062,7 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                           return (
                             <td key={i} className={`px-1 py-1 border-r border-slate-100 last:border-r-0 ${isWeekend ? "bg-amber-50/60" : ""}`}>
                               <input type={type} value={d[key] || ""}
-                                placeholder={key === "wrap" ? "HH:MM" : undefined}
+                                placeholder={key === "wrap" ? "--:--" : undefined}
                                 title={key === "wrap" ? "For next-day wraps use hours > 23, e.g. 27:18 = 3:18am" : undefined}
                                 onChange={e => setEditingTimecard(p => ({ ...p, days: p.days.map((day, idx) => idx !== i ? day : { ...day, [key]: e.target.value }) }))}
                                 className={`w-full text-xs border rounded px-1 py-0.5 text-center focus:outline-none focus:border-blue-400 ${isNextDay ? "border-violet-300 bg-violet-50 text-violet-700 font-medium" : isWeekend ? "border-amber-200 bg-amber-50" : "border-slate-200 bg-white"}`} />
@@ -1643,22 +2089,106 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                         );
                       })}
                     </tr>
-                    <tr className="bg-blue-600 border-t-2 border-blue-700">
-                      <td className="px-3 py-2 text-[10px] font-bold text-blue-100 uppercase border-r border-blue-500">Total Hrs</td>
+                    <tr className="bg-violet-50 border-t border-violet-200">
+                      <td className="px-3 py-1.5 text-[10px] font-bold text-violet-700 uppercase border-r border-slate-200 whitespace-nowrap">
+                        Work Per Diem
+                        {parseFloat(editingTimecard.workPerDiem) > 0 && (() => {
+                          const wRate = parseFloat(editingTimecard.workPerDiem);
+                          const wCount = editingTimecard.days.filter(d => d.perDiemWork).length;
+                          return (<>
+                            <div className="text-[9px] font-normal normal-case text-violet-400">{"$" + wRate.toLocaleString(undefined, { minimumFractionDigits: 2 }) + "/day"}</div>
+                            {wCount > 0 && <div className="text-[9px] font-normal normal-case text-violet-500">{wCount + " day" + (wCount !== 1 ? "s" : "") + " = $" + (wRate * wCount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>}
+                          </>);
+                        })()}
+                      </td>
                       {editingTimecard.days.map((d, i) => {
-                        const h = calcDayHours(d);
-                        const guarH = parseFloat(editingTimecard.guarHours) || 0;
-                        const paidH = h > 0 ? Math.max(h, guarH) : 0;
-                        const ot = calcOTBreakdown(paidH);
                         const isWeekend = i === 0 || i === 6;
                         return (
-                          <td key={i} className={`px-1 py-2 text-center border-r border-blue-500 last:border-r-0 ${isWeekend ? "bg-blue-700" : ""}`}>
-                            <div className={`font-bold text-sm ${paidH > 0 ? "text-white" : "text-blue-400"}`}>{paidH > 0 ? paidH : "—"}</div>
-                            {ot.hours15x > 0 && <div className="text-[9px] text-amber-300 font-medium">{ot.hours15x}h @1.5×</div>}
-                            {ot.hours2x > 0 && <div className="text-[9px] text-red-300 font-medium">{ot.hours2x}h @2×</div>}
+                          <td key={i} className={`px-1 py-1.5 border-r border-slate-100 last:border-r-0 text-center ${isWeekend ? "bg-amber-50/60" : ""}`}>
+                            <input
+                              type="checkbox"
+                              checked={!!d.perDiemWork}
+                              onChange={e => setEditingTimecard(p => ({ ...p, days: p.days.map((day, idx) => idx !== i ? day : { ...day, perDiemWork: e.target.checked, perDiemOff: e.target.checked ? false : day.perDiemOff }) }))}
+                              className="w-4 h-4 rounded accent-violet-500 cursor-pointer"
+                              title="Apply work day per diem to this day"
+                            />
                           </td>
                         );
                       })}
+                    </tr>
+                    <tr className="bg-teal-50 border-t border-teal-200">
+                      <td className="px-3 py-1.5 text-[10px] font-bold text-teal-700 uppercase border-r border-slate-200 whitespace-nowrap">
+                        Day Off Per Diem
+                        {parseFloat(editingTimecard.daysOffPerDiem) > 0 && (() => {
+                          const oRate = parseFloat(editingTimecard.daysOffPerDiem);
+                          const oCount = editingTimecard.days.filter(d => d.perDiemOff).length;
+                          return (<>
+                            <div className="text-[9px] font-normal normal-case text-teal-400">{"$" + oRate.toLocaleString(undefined, { minimumFractionDigits: 2 }) + "/day"}</div>
+                            {oCount > 0 && <div className="text-[9px] font-normal normal-case text-teal-600">{oCount + " day" + (oCount !== 1 ? "s" : "") + " = $" + (oRate * oCount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>}
+                          </>);
+                        })()}
+                      </td>
+                      {editingTimecard.days.map((d, i) => {
+                        const isWeekend = i === 0 || i === 6;
+                        return (
+                          <td key={i} className={`px-1 py-1.5 border-r border-slate-100 last:border-r-0 text-center ${isWeekend ? "bg-amber-50/60" : ""}`}>
+                            <input
+                              type="checkbox"
+                              checked={!!d.perDiemOff}
+                              onChange={e => setEditingTimecard(p => ({ ...p, days: p.days.map((day, idx) => idx !== i ? day : { ...day, perDiemOff: e.target.checked, perDiemWork: e.target.checked ? false : day.perDiemWork }) }))}
+                              className="w-4 h-4 rounded accent-teal-500 cursor-pointer"
+                              title="Apply day off per diem to this day"
+                            />
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    <tr className="bg-emerald-50 border-t border-emerald-200">
+                      <td className="px-3 py-1.5 text-[10px] font-bold text-emerald-700 uppercase border-r border-slate-200 whitespace-nowrap">Daily Total</td>
+                      {(() => {
+                        const sixthIdx = get6thDayIndex(editingTimecard.days);
+                        const rate = parseFloat(editingTimecard.rate) || 0;
+                        const guarH = parseFloat(editingTimecard.guarHours) || 0;
+                        const wPD = parseFloat(editingTimecard.workPerDiem) || 0;
+                        const oPD = parseFloat(editingTimecard.daysOffPerDiem) || 0;
+                        return editingTimecard.days.map((d, i) => {
+                          const h = calcDayHours(d);
+                          const paidH = h > 0 ? Math.max(h, guarH) : 0;
+                          const ot = i === sixthIdx ? calcOTBreakdown6thDay(paidH) : calcOTBreakdown(paidH);
+                          const perDiem = (d.perDiemWork ? wPD : 0) + (d.perDiemOff ? oPD : 0);
+                          const dayTotal = ot.hours1x * rate + ot.hours15x * rate * 1.5 + ot.hours2x * rate * 2 + (d.mealPenalty ? rate : 0) + perDiem;
+                          const isWeekend = i === 0 || i === 6;
+                          return (
+                            <td key={i} className={`px-1 py-1.5 text-center border-r border-slate-100 last:border-r-0 ${isWeekend ? "bg-amber-50/60" : ""}`}>
+                              {(paidH > 0 || perDiem > 0)
+                                ? <span className="text-xs font-bold text-emerald-700">${dayTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                                : <span className="text-slate-300 text-xs">—</span>}
+                            </td>
+                          );
+                        });
+                      })()}
+                    </tr>
+                    <tr className="bg-blue-600 border-t-2 border-blue-700">
+                      <td className="px-3 py-2 text-[10px] font-bold text-blue-100 uppercase border-r border-blue-500">Total Hrs</td>
+                      {(() => {
+                        const sixthIdx = get6thDayIndex(editingTimecard.days);
+                        const guarH = parseFloat(editingTimecard.guarHours) || 0;
+                        return editingTimecard.days.map((d, i) => {
+                          const h = calcDayHours(d);
+                          const paidH = h > 0 ? Math.max(h, guarH) : 0;
+                          const is6th = i === sixthIdx;
+                          const ot = is6th ? calcOTBreakdown6thDay(paidH) : calcOTBreakdown(paidH);
+                          const isWeekend = i === 0 || i === 6;
+                          return (
+                            <td key={i} className={`px-1 py-2 text-center border-r border-blue-500 last:border-r-0 ${isWeekend ? "bg-blue-700" : ""}`}>
+                              <div className={`font-bold text-sm ${paidH > 0 ? "text-white" : "text-blue-400"}`}>{paidH > 0 ? paidH : "—"}</div>
+                              {is6th && paidH > 0 && <div className="text-[9px] text-cyan-300 font-bold">6th day</div>}
+                              {ot.hours15x > 0 && <div className="text-[9px] text-amber-300 font-medium">{ot.hours15x}h @1.5×</div>}
+                              {ot.hours2x > 0 && <div className="text-[9px] text-red-300 font-medium">{ot.hours2x}h @2×</div>}
+                            </td>
+                          );
+                        });
+                      })()}
                     </tr>
                   </tbody>
                 </table>
@@ -1669,6 +2199,437 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
               <Button onClick={saveTimecardEdit} disabled={!editingTimecard.company || !editingTimecard.rate}>
                 Save Changes
               </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Client Manager Modal ── */}
+      {showClientManager && (
+        <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4" onClick={() => setShowClientManager(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+              <div className="flex items-center gap-2.5">
+                <Briefcase size={17} className="text-blue-600" />
+                <h2 className="font-bold text-slate-800 text-base">Manage Clients</h2>
+              </div>
+              <button onClick={() => setShowClientManager(false)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
+            </div>
+
+            <div className="px-5 py-4 space-y-2 max-h-72 overflow-y-auto">
+              {clients.length === 0 && (
+                <p className="text-sm text-slate-400 text-center py-6">No saved clients yet. Add one below.</p>
+              )}
+              {clients.map(c => (
+                <div key={c.id} className="flex items-start justify-between gap-3 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3">
+                  <div className="min-w-0">
+                    <p className="font-semibold text-slate-800 text-sm truncate">{c.name}</p>
+                    {c.address && <p className="text-xs text-slate-500 truncate mt-0.5">{c.address}</p>}
+                    {(c.city || c.state || c.zip) && <p className="text-xs text-slate-500 truncate">{[c.city, c.state, c.zip].filter(Boolean).join(", ")}</p>}
+                    <div className="flex gap-3 mt-0.5">
+                      {c.email && <p className="text-xs text-slate-400 truncate">{c.email}</p>}
+                      {c.phone && <p className="text-xs text-slate-400">{c.phone}</p>}
+                    </div>
+                  </div>
+                  <Button variant="danger" onClick={() => { if (window.confirm("Remove this client?")) setClients(prev => prev.filter(x => x.id !== c.id)); }} className="!p-1.5 shrink-0" title="Delete client">
+                    <Trash2 size={13} />
+                  </Button>
+                </div>
+              ))}
+            </div>
+
+            <div className="px-5 pb-5 pt-3 border-t border-slate-200 space-y-3 bg-slate-50">
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Add Client</p>
+              <div className="grid grid-cols-2 gap-2">
+                <Input value={newClient.name} onChange={e => setNewClient(p => ({ ...p, name: e.target.value }))} placeholder="Client / Company name *" />
+                <Input value={newClient.address} onChange={e => setNewClient(p => ({ ...p, address: e.target.value }))} placeholder="Street address" />
+                <Input value={newClient.city} onChange={e => setNewClient(p => ({ ...p, city: e.target.value }))} placeholder="City" />
+                <Input value={newClient.state} onChange={e => setNewClient(p => ({ ...p, state: e.target.value }))} placeholder="State" />
+                <Input value={newClient.zip} onChange={e => setNewClient(p => ({ ...p, zip: e.target.value }))} placeholder="Zip" />
+                <Input value={newClient.email} onChange={e => setNewClient(p => ({ ...p, email: e.target.value }))} placeholder="Email" />
+                <Input value={newClient.phone} onChange={e => setNewClient(p => ({ ...p, phone: e.target.value }))} placeholder="Phone" />
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setShowClientManager(false)}>Done</Button>
+                <Button
+                  disabled={!newClient.name.trim()}
+                  onClick={() => {
+                    if (!newClient.name.trim()) return;
+                    setClients(prev => [...prev, { id: crypto.randomUUID(), ...newClient }]);
+                    setNewClient({ name: "", address: "", city: "", state: "", zip: "", email: "", phone: "" });
+                  }}
+                >
+                  <Plus size={14} className="mr-1" />Save Client
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Invoice Generator Modal ── */}
+      {showInvoiceGenerator && invoiceForm && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-start justify-center p-4 overflow-y-auto" onClick={() => setShowInvoiceGenerator(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-3xl shadow-2xl my-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+              <div className="flex items-center gap-2.5">
+                <FileText size={18} className="text-blue-600" />
+                <h2 className="font-bold text-slate-800 text-base">Create Invoice</h2>
+              </div>
+              <button onClick={() => setShowInvoiceGenerator(false)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
+            </div>
+
+            <div className="px-6 py-5 space-y-5">
+
+              {/* YOUR INFO */}
+              <div>
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-3">Your Info</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Name</label>
+                    <Input value={invoiceForm.senderName} onChange={e => setInvoiceForm(p => ({ ...p, senderName: e.target.value }))} placeholder="Your full name" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Email</label>
+                    <Input value={invoiceForm.senderEmail} onChange={e => setInvoiceForm(p => ({ ...p, senderEmail: e.target.value }))} placeholder="your@email.com" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Phone</label>
+                    <Input value={invoiceForm.senderPhone} onChange={e => setInvoiceForm(p => ({ ...p, senderPhone: e.target.value }))} placeholder="(555) 000-0000" />
+                  </div>
+                  <div className="space-y-1 col-span-2">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Street Address</label>
+                    <Input value={invoiceForm.senderAddress} onChange={e => setInvoiceForm(p => ({ ...p, senderAddress: e.target.value }))} placeholder="123 Main St" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">City</label>
+                    <Input value={invoiceForm.senderCity} onChange={e => setInvoiceForm(p => ({ ...p, senderCity: e.target.value }))} placeholder="Los Angeles" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">State</label>
+                    <Input value={invoiceForm.senderState} onChange={e => setInvoiceForm(p => ({ ...p, senderState: e.target.value }))} placeholder="CA" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Zip</label>
+                    <Input value={invoiceForm.senderZip} onChange={e => setInvoiceForm(p => ({ ...p, senderZip: e.target.value }))} placeholder="90001" />
+                  </div>
+                </div>
+              </div>
+
+              {/* INVOICE META */}
+              <div className="border-t border-slate-100 pt-4">
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-3">Invoice Details</p>
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Invoice #</label>
+                    <Input value={invoiceForm.invoiceNumber} onChange={e => setInvoiceForm(p => ({ ...p, invoiceNumber: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Date</label>
+                    <Input type="date" value={invoiceForm.invoiceDate} onChange={e => setInvoiceForm(p => ({ ...p, invoiceDate: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Due Date</label>
+                    <Input type="date" value={invoiceForm.dueDate} onChange={e => setInvoiceForm(p => ({ ...p, dueDate: e.target.value }))} />
+                  </div>
+                </div>
+              </div>
+
+              {/* CLIENT */}
+              <div className="border-t border-slate-100 pt-4">
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Client / Customer</p>
+                  <Button variant="ghost" className="h-7 text-xs gap-1 text-blue-600" onClick={() => setShowClientManager(true)}>
+                    <Briefcase size={12} />Manage Clients
+                  </Button>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Select Saved Client</label>
+                    <select
+                      value=""
+                      onChange={e => {
+                        const c = clients.find(c => c.id === e.target.value);
+                        if (c) setInvoiceForm(p => ({ ...p, clientName: c.name, clientAddress: c.address || "", clientCity: c.city || "", clientState: c.state || "", clientZip: c.zip || "" }));
+                      }}
+                      className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                      <option value="">— Pick a saved client —</option>
+                      {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Job / Show</label>
+                    <select value={invoiceForm.jobId} onChange={e => { const j = jobs.find(j => j.id === e.target.value); setInvoiceForm(p => ({ ...p, jobId: e.target.value, jobName: j ? j.name : "" })); }}
+                      className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                      <option value="">— None —</option>
+                      {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Client Name</label>
+                    <Input value={invoiceForm.clientName} onChange={e => setInvoiceForm(p => ({ ...p, clientName: e.target.value }))} placeholder="Production Company" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Street Address</label>
+                    <Input value={invoiceForm.clientAddress} onChange={e => setInvoiceForm(p => ({ ...p, clientAddress: e.target.value }))} placeholder="123 Main St" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">City</label>
+                    <Input value={invoiceForm.clientCity} onChange={e => setInvoiceForm(p => ({ ...p, clientCity: e.target.value }))} placeholder="Los Angeles" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">State</label>
+                    <Input value={invoiceForm.clientState} onChange={e => setInvoiceForm(p => ({ ...p, clientState: e.target.value }))} placeholder="CA" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Zip</label>
+                    <Input value={invoiceForm.clientZip} onChange={e => setInvoiceForm(p => ({ ...p, clientZip: e.target.value }))} placeholder="90001" />
+                  </div>
+                </div>
+              </div>
+
+              {/* LINE ITEMS */}
+              <div className="border-t border-slate-100 pt-4">
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Line Items</p>
+                  <Button variant="ghost" className="h-7 text-xs gap-1" onClick={() => setInvoiceForm(p => ({ ...p, lineItems: [...p.lineItems, { id: crypto.randomUUID(), description: "", qty: "1", rate: "", amount: 0 }] }))}>
+                    <Plus size={12} />Add Row
+                  </Button>
+                </div>
+
+                {/* Quick-add from package */}
+                {kitPackages.length > 0 && (() => {
+                  const selectedPkg = kitPackages.find(p => p.id === pkgQaId);
+                  const pkgRate = selectedPkg
+                    ? (pkgQaRateType === "daily" ? parseFloat(selectedPkg.dailyRate) || 0 : parseFloat(selectedPkg.weeklyRate) || 0)
+                    : 0;
+                  const pkgAmount = pkgRate * (parseFloat(pkgQaQty) || 0);
+                  return (
+                    <div className="mb-3 bg-indigo-50 border border-indigo-200 rounded-xl p-3 flex flex-wrap items-end gap-2">
+                      <div className="space-y-1 flex-1 min-w-36">
+                        <label className="text-[10px] font-bold text-indigo-500 uppercase">Package</label>
+                        <select
+                          value={pkgQaId}
+                          onChange={e => setPkgQaId(e.target.value)}
+                          className="flex w-full rounded-lg border border-indigo-200 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400">
+                          <option value="">— Select package —</option>
+                          {kitPackages.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold text-indigo-500 uppercase">Rate Type</label>
+                        <div className="flex rounded-lg border border-indigo-200 overflow-hidden text-sm bg-white">
+                          {["daily", "weekly"].map(rt => (
+                            <button key={rt} onClick={() => setPkgQaRateType(rt)}
+                              className={`px-3 py-1.5 font-semibold capitalize transition-colors ${pkgQaRateType === rt ? "bg-indigo-600 text-white" : "text-slate-500 hover:bg-indigo-50"}`}>
+                              {rt}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="space-y-1 w-24">
+                        <label className="text-[10px] font-bold text-indigo-500 uppercase">
+                          {pkgQaRateType === "daily" ? "Days" : "Weeks"}
+                        </label>
+                        <Input type="number" min="1" value={pkgQaQty} onChange={e => setPkgQaQty(e.target.value)} className="text-center" />
+                      </div>
+                      {selectedPkg && (
+                        <div className="w-full">
+                          {(() => {
+                            const pkgItems = purchases.filter(p => p.isKit && (selectedPkg.itemIds || []).includes(p.id));
+                            const pkgItemNames = pkgItems.map(p => p.name).filter(Boolean);
+                            return pkgItemNames.length > 0 ? (
+                              <div className="mb-2 px-3 py-2 bg-white border border-indigo-200 rounded-lg">
+                                <p className="text-[10px] font-bold text-indigo-500 uppercase mb-1">Includes</p>
+                                <ul className="space-y-0.5">
+                                  {pkgItemNames.map((n, i) => <li key={i} className="text-xs text-slate-600 flex items-center gap-1.5"><span className="w-1 h-1 rounded-full bg-indigo-400 shrink-0"></span>{n}</li>)}
+                                </ul>
+                              </div>
+                            ) : null;
+                          })()}
+                          <div className="flex items-center gap-3 mb-2">
+                            <p className="text-xs text-indigo-600 font-semibold">
+                              ${pkgRate.toLocaleString(undefined, { minimumFractionDigits: 2 })} × {pkgQaQty} = ${pkgAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                            </p>
+                            <label className="flex items-center gap-1.5 text-xs text-indigo-700 font-semibold cursor-pointer select-none ml-auto">
+                              <input type="checkbox" checked={pkgQaExpand} onChange={e => setPkgQaExpand(e.target.checked)}
+                                className="rounded border-indigo-300 accent-indigo-600" />
+                              List each item as separate line
+                            </label>
+                          </div>
+                        </div>
+                      )}
+                      <Button
+                        disabled={!selectedPkg || !pkgQaQty || pkgRate === 0}
+                        onClick={() => {
+                          const qty = pkgQaQty;
+                          const rate = pkgRate;
+                          const rateLabel = pkgQaRateType.charAt(0).toUpperCase() + pkgQaRateType.slice(1);
+                          let newRows;
+                          if (pkgQaExpand) {
+                            // package as one priced line, then each item at $0
+                            const pkgItems = purchases.filter(p => p.isKit && (selectedPkg.itemIds || []).includes(p.id));
+                            newRows = [
+                              { id: crypto.randomUUID(), description: `${selectedPkg.name} — ${rateLabel} Rental`, qty, rate: String(rate), amount: rate * (parseFloat(qty) || 0) },
+                              ...pkgItems.map(item => ({
+                                id: crypto.randomUUID(),
+                                description: `  • ${item.name}`,
+                                qty: "",
+                                rate: "",
+                                amount: 0,
+                              })),
+                            ];
+                          } else {
+                            newRows = [{ id: crypto.randomUUID(), description: `${selectedPkg.name} — ${rateLabel} Rental`, qty, rate: String(rate), amount: rate * (parseFloat(qty) || 0) }];
+                          }
+                          setInvoiceForm(p => ({ ...p, lineItems: [...p.lineItems, ...newRows] }));
+                          setPkgQaId("");
+                          setPkgQaQty("1");
+                        }}
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white h-9"
+                      >
+                        <Plus size={13} className="mr-1" />Add to Invoice
+                      </Button>
+                    </div>
+                  );
+                })()} 
+
+                <div className="border border-slate-200 rounded-lg overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50 border-b border-slate-200">
+                      <tr>
+                        <th className="text-left px-3 py-2 text-[10px] font-bold text-slate-400 uppercase">Description</th>
+                        <th className="px-3 py-2 text-[10px] font-bold text-slate-400 uppercase text-center w-24">Qty / Hrs</th>
+                        <th className="px-3 py-2 text-[10px] font-bold text-slate-400 uppercase text-right w-28">Rate ($)</th>
+                        <th className="px-3 py-2 text-[10px] font-bold text-slate-400 uppercase text-right w-32">Amount</th>
+                        <th className="w-8"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {invoiceForm.lineItems.map(li => (
+                        <tr key={li.id} className="border-b border-slate-100 last:border-b-0">
+                          <td className="px-2 py-1">
+                            <Input value={li.description} onChange={e => updateLineItem(li.id, "description", e.target.value)} placeholder="Services rendered…" className="border-0 shadow-none focus:ring-0 bg-transparent px-1 py-1" />
+                          </td>
+                          <td className="px-2 py-1">
+                            <Input type="number" value={li.qty} onChange={e => updateLineItem(li.id, "qty", e.target.value)} className="border-0 shadow-none focus:ring-0 bg-transparent text-center px-1 py-1" />
+                          </td>
+                          <td className="px-2 py-1">
+                            <Input type="number" value={li.rate} onChange={e => updateLineItem(li.id, "rate", e.target.value)} placeholder="0.00" className="border-0 shadow-none focus:ring-0 bg-transparent text-right px-1 py-1" />
+                          </td>
+                          <td className="px-3 py-1 text-right font-semibold text-slate-700 text-sm">
+                            {(li.amount || 0) > 0 ? `$${li.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : <span className="text-slate-300">&mdash;</span>}
+                          </td>
+                          <td className="px-1 py-1 text-center">
+                            {invoiceForm.lineItems.length > 1 && (
+                              <button onClick={() => setInvoiceForm(p => ({ ...p, lineItems: p.lineItems.filter(x => x.id !== li.id) }))} className="text-slate-300 hover:text-red-400 transition-colors">
+                                <X size={13} />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {/* Subtotal / Tax / Total */}
+                <div className="mt-3 flex justify-end">
+                  <div className="w-60 space-y-1.5 text-sm">
+                    <div className="flex justify-between text-slate-500">
+                      <span>Subtotal</span>
+                      <span>${invoiceForm.lineItems.reduce((a, li) => a + (li.amount || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-slate-500 gap-2">
+                      <span>Tax</span>
+                      <div className="flex items-center gap-1">
+                        <Input type="number" value={invoiceForm.taxRate} onChange={e => setInvoiceForm(p => ({ ...p, taxRate: e.target.value }))} placeholder="0" className="w-16 h-7 text-right text-xs py-1" />
+                        <span className="text-xs text-slate-400">%</span>
+                      </div>
+                    </div>
+                    <div className="flex justify-between font-bold text-slate-800 border-t border-slate-200 pt-1.5">
+                      <span>Total</span>
+                      <span>${(invoiceForm.lineItems.reduce((a, li) => a + (li.amount || 0), 0) * (1 + (parseFloat(invoiceForm.taxRate) || 0) / 100)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* NOTES */}
+              <div className="border-t border-slate-100 pt-4">
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Notes / Comments</p>
+                <textarea value={invoiceForm.notes} onChange={e => setInvoiceForm(p => ({ ...p, notes: e.target.value }))}
+                  placeholder="Optional notes, project details, etc."
+                  rows={2}
+                  className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 resize-none" />
+              </div>
+
+              {/* PAYMENT INFO */}
+              <div className="border-t border-slate-100 pt-4">
+                <div className="flex items-center gap-3 mb-3">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Payment Method</p>
+                  {["ACH", "Check", "PayPal", "Zelle", "Venmo"].map(m => (
+                    <button key={m} onClick={() => setInvoiceForm(p => ({ ...p, paymentMethod: m }))}
+                      className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${
+                        invoiceForm.paymentMethod === m
+                          ? "bg-blue-600 text-white border-blue-600"
+                          : "bg-white text-slate-500 border-slate-300 hover:border-blue-400 hover:text-blue-600"
+                      }`}>{m}</button>
+                  ))}
+                </div>
+                {invoiceForm.paymentMethod === "ACH" && (
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase">Bank Name</label>
+                      <Input value={invoiceForm.bankName} onChange={e => setInvoiceForm(p => ({ ...p, bankName: e.target.value }))} placeholder="Chase, Wells Fargo…" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase">Routing #</label>
+                      <Input value={invoiceForm.routingNumber} onChange={e => setInvoiceForm(p => ({ ...p, routingNumber: e.target.value.replace(/\D/g, "").slice(0, 9) }))} placeholder="123456789" className="font-mono" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase">Account #</label>
+                      <Input value={invoiceForm.accountNumber} onChange={e => setInvoiceForm(p => ({ ...p, accountNumber: e.target.value.replace(/\D/g, "") }))} placeholder="Account number" className="font-mono" />
+                    </div>
+                  </div>
+                )}
+                {invoiceForm.paymentMethod === "PayPal" && (
+                  <div className="space-y-1 max-w-sm">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">PayPal Email / Username</label>
+                    <Input value={invoiceForm.paypalHandle} onChange={e => setInvoiceForm(p => ({ ...p, paypalHandle: e.target.value }))} placeholder="you@paypal.com or @username" />
+                  </div>
+                )}
+                {invoiceForm.paymentMethod === "Zelle" && (
+                  <div className="space-y-1 max-w-sm">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Zelle Phone / Email</label>
+                    <Input value={invoiceForm.zelleHandle} onChange={e => setInvoiceForm(p => ({ ...p, zelleHandle: e.target.value }))} placeholder="(555) 000-0000 or you@email.com" />
+                  </div>
+                )}
+                {invoiceForm.paymentMethod === "Venmo" && (
+                  <div className="space-y-1 max-w-sm">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Venmo Username</label>
+                    <Input value={invoiceForm.venmoHandle} onChange={e => setInvoiceForm(p => ({ ...p, venmoHandle: e.target.value }))} placeholder="@your-venmo" />
+                  </div>
+                )}
+                {invoiceForm.paymentMethod === "Check" && (
+                  <div className="space-y-1 max-w-sm">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Make Check Payable To</label>
+                    <Input value={invoiceForm.checkPayableTo} onChange={e => setInvoiceForm(p => ({ ...p, checkPayableTo: e.target.value }))} placeholder="Your name or business name" />
+                  </div>
+                )}
+              </div>
+
+            </div>
+
+            <div className="px-6 pb-5 pt-4 flex items-center justify-between gap-3 border-t border-slate-200 bg-slate-50 rounded-b-2xl">
+              <Button variant="outline" onClick={() => setShowInvoiceGenerator(false)}>Cancel</Button>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={() => downloadInvoicePDF(invoiceForm, false)} className="gap-1.5">
+                  <Download size={15} />Preview PDF
+                </Button>
+                <Button onClick={() => { downloadInvoicePDF(invoiceForm, true); setShowInvoiceGenerator(false); setActiveTab("invoices"); }} className="gap-1.5">
+                  <Download size={15} />Save &amp; Download
+                </Button>
+              </div>
             </div>
           </div>
         </div>
@@ -1924,6 +2885,9 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                   <Button variant="ghost" onClick={() => relinkInputRef.current?.click()} className="h-8 text-xs gap-1.5 text-slate-500" title="Restore data from backup file">
                     <RefreshCw size={13} /> Restore
                   </Button>
+                  <Button variant="outline" onClick={openInvoiceGenerator} className="h-8 text-xs gap-1 text-blue-600 border-blue-200 hover:bg-blue-50">
+                    <FileText size={13} />Create Invoice
+                  </Button>
                   {showNewJobForm ? (
                     <form onSubmit={e => { e.preventDefault(); if (newJobName.trim()) { addJob(newJobName); setNewJobName(""); setShowNewJobForm(false); } }} className="flex gap-2">
                       <Input value={newJobName} onChange={e => setNewJobName(e.target.value)} placeholder="Job name" className="w-48 h-8 text-sm" autoFocus />
@@ -2018,6 +2982,13 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                                     <div className="space-y-3">
                                       <div className="space-y-1">
                                         <label className="text-[10px] font-bold text-slate-400 uppercase">Client / Company</label>
+                                        {clients.length > 0 && !item.locked && (
+                                          <select value="" onChange={e => { if (e.target.value) { const n = [...invoices]; n[idx] = { ...n[idx], company: e.target.value }; setInvoices(n); } }}
+                                            className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 mb-1">
+                                            <option value="">— Saved client —</option>
+                                            {clients.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                                          </select>
+                                        )}
                                         <Input value={item.company} placeholder="Click to add company name" disabled={!!item.locked} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], company: e.target.value }; setInvoices(n); }} />
                                       </div>
                                       <div className="grid grid-cols-2 gap-3">
@@ -2153,7 +3124,22 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
                 <div className="space-y-1 col-span-2 sm:col-span-3 lg:col-span-2">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Production Company *</label>
+                  {clients.length > 0 && (
+                    <select value="" onChange={e => { if (e.target.value) setNewTimecard(p => ({ ...p, company: e.target.value })); }}
+                      className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 mb-1">
+                      <option value="">— Saved client —</option>
+                      {clients.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                    </select>
+                  )}
                   <Input value={newTimecard.company} onChange={e => setNewTimecard(p => ({ ...p, company: e.target.value }))} placeholder="e.g. KISSD Honda" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Job</label>
+                  <select value={newTimecard.jobId} onChange={e => setNewTimecard(p => ({ ...p, jobId: e.target.value }))}
+                    className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                    <option value="">— Unassigned —</option>
+                    {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
+                  </select>
                 </div>
                 <div className="space-y-1 col-span-2 sm:col-span-3 lg:col-span-2">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Job Name / Show</label>
@@ -2200,16 +3186,16 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                   <Input type="number" value={newTimecard.mileage} onChange={e => setNewTimecard(p => ({ ...p, mileage: e.target.value }))} placeholder="0" />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Notes</label>
-                  <Input value={newTimecard.description} onChange={e => setNewTimecard(p => ({ ...p, description: e.target.value }))} placeholder="Meal penalty, etc." />
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Work Day Per Diem ($)</label>
+                  <Input type="number" value={newTimecard.workPerDiem} onChange={e => setNewTimecard(p => ({ ...p, workPerDiem: e.target.value }))} placeholder="0" />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Job</label>
-                  <select value={newTimecard.jobId} onChange={e => setNewTimecard(p => ({ ...p, jobId: e.target.value }))}
-                    className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
-                    <option value="">— Unassigned —</option>
-                    {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
-                  </select>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Day Off Per Diem ($)</label>
+                  <Input type="number" value={newTimecard.daysOffPerDiem} onChange={e => setNewTimecard(p => ({ ...p, daysOffPerDiem: e.target.value }))} placeholder="0" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Notes</label>
+                  <Input value={newTimecard.description} onChange={e => setNewTimecard(p => ({ ...p, description: e.target.value }))} placeholder="Meal penalty, etc." />
                 </div>
                 <div className="space-y-1 col-span-2">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Your Name</label>
@@ -2316,7 +3302,7 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                           return (
                             <td key={i} className={`px-1 py-1 border-r border-slate-100 last:border-r-0 ${isWeekend ? "bg-amber-50/60" : ""}`}>
                               <input type={type} value={d[key]}
-                                placeholder={key === "wrap" ? "HH:MM" : undefined}
+                                placeholder={key === "wrap" ? "--:--" : undefined}
                                 title={key === "wrap" ? "For next-day wraps use hours > 23, e.g. 27:18 = 3:18am" : undefined}
                                 onChange={e => setNewTimecard(p => ({ ...p, days: p.days.map((day, idx) => idx !== i ? day : { ...day, [key]: e.target.value }) }))}
                                 className={`w-full text-xs border rounded px-1 py-0.5 text-center focus:outline-none focus:border-blue-400 ${isNextDay ? "border-violet-300 bg-violet-50 text-violet-700 font-medium" : isWeekend ? "border-amber-200 bg-amber-50" : "border-slate-200 bg-white"}`} />
@@ -2326,7 +3312,6 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                         })}
                       </tr>
                     ))}
-                    {/* Calculated totals row */}
                     <tr className="bg-orange-50 border-t border-orange-200">
                       <td className="px-3 py-1.5 text-[10px] font-bold text-orange-700 uppercase border-r border-slate-200 whitespace-nowrap">Meal Penalty</td>
                       {newTimecard.days.map((d, i) => {
@@ -2344,21 +3329,106 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                         );
                       })}
                     </tr>
-                    {/* Calculated totals row */}
-                    <tr className="bg-blue-600 border-t-2 border-blue-700">
-                      <td className="px-3 py-2 text-[10px] font-bold text-blue-100 uppercase border-r border-blue-500">Total Hrs</td>
+                    <tr className="bg-violet-50 border-t border-violet-200">
+                      <td className="px-3 py-1.5 text-[10px] font-bold text-violet-700 uppercase border-r border-slate-200 whitespace-nowrap">
+                        Work Per Diem
+                        {parseFloat(newTimecard.workPerDiem) > 0 && (() => {
+                          const wRate = parseFloat(newTimecard.workPerDiem);
+                          const wCount = newTimecard.days.filter(d => d.perDiemWork).length;
+                          return (<>
+                            <div className="text-[9px] font-normal normal-case text-violet-400">{"$" + wRate.toLocaleString(undefined, { minimumFractionDigits: 2 }) + "/day"}</div>
+                            {wCount > 0 && <div className="text-[9px] font-normal normal-case text-violet-500">{wCount + " day" + (wCount !== 1 ? "s" : "") + " = $" + (wRate * wCount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>}
+                          </>);
+                        })()}
+                      </td>
                       {newTimecard.days.map((d, i) => {
-                        const h = calcDayHours(d);
-                        const ot = calcOTBreakdown(h);
-                        const isWeekend = (i === 0 || i === 6);
+                        const isWeekend = i === 0 || i === 6;
                         return (
-                          <td key={i} className={`px-1 py-2 text-center border-r border-blue-500 last:border-r-0 ${isWeekend ? "bg-blue-700" : ""}`}>
-                            <div className={`font-bold text-sm ${h > 0 ? "text-white" : "text-blue-400"}`}>{h > 0 ? h : "—"}</div>
-                            {ot.hours15x > 0 && <div className="text-[9px] text-amber-300 font-medium">{ot.hours15x}h @1.5×</div>}
-                            {ot.hours2x > 0 && <div className="text-[9px] text-red-300 font-medium">{ot.hours2x}h @2×</div>}
+                          <td key={i} className={`px-1 py-1.5 border-r border-slate-100 last:border-r-0 text-center ${isWeekend ? "bg-amber-50/60" : ""}`}>
+                            <input
+                              type="checkbox"
+                              checked={!!d.perDiemWork}
+                              onChange={e => setNewTimecard(p => ({ ...p, days: p.days.map((day, idx) => idx !== i ? day : { ...day, perDiemWork: e.target.checked, perDiemOff: e.target.checked ? false : day.perDiemOff }) }))}
+                              className="w-4 h-4 rounded accent-violet-500 cursor-pointer"
+                              title="Apply work day per diem to this day"
+                            />
                           </td>
                         );
                       })}
+                    </tr>
+                    <tr className="bg-teal-50 border-t border-teal-200">
+                      <td className="px-3 py-1.5 text-[10px] font-bold text-teal-700 uppercase border-r border-slate-200 whitespace-nowrap">
+                        Day Off Per Diem
+                        {parseFloat(newTimecard.daysOffPerDiem) > 0 && (() => {
+                          const oRate = parseFloat(newTimecard.daysOffPerDiem);
+                          const oCount = newTimecard.days.filter(d => d.perDiemOff).length;
+                          return (<>
+                            <div className="text-[9px] font-normal normal-case text-teal-400">{"$" + oRate.toLocaleString(undefined, { minimumFractionDigits: 2 }) + "/day"}</div>
+                            {oCount > 0 && <div className="text-[9px] font-normal normal-case text-teal-600">{oCount + " day" + (oCount !== 1 ? "s" : "") + " = $" + (oRate * oCount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>}
+                          </>);
+                        })()}
+                      </td>
+                      {newTimecard.days.map((d, i) => {
+                        const isWeekend = i === 0 || i === 6;
+                        return (
+                          <td key={i} className={`px-1 py-1.5 border-r border-slate-100 last:border-r-0 text-center ${isWeekend ? "bg-amber-50/60" : ""}`}>
+                            <input
+                              type="checkbox"
+                              checked={!!d.perDiemOff}
+                              onChange={e => setNewTimecard(p => ({ ...p, days: p.days.map((day, idx) => idx !== i ? day : { ...day, perDiemOff: e.target.checked, perDiemWork: e.target.checked ? false : day.perDiemWork }) }))}
+                              className="w-4 h-4 rounded accent-teal-500 cursor-pointer"
+                              title="Apply day off per diem to this day"
+                            />
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    <tr className="bg-emerald-50 border-t border-emerald-200">
+                      <td className="px-3 py-1.5 text-[10px] font-bold text-emerald-700 uppercase border-r border-slate-200 whitespace-nowrap">Daily Total</td>
+                      {(() => {
+                        const sixthIdx = get6thDayIndex(newTimecard.days);
+                        const rate = parseFloat(newTimecard.rate) || 0;
+                        const guarH = parseFloat(newTimecard.guarHours) || 0;
+                        const wPD = parseFloat(newTimecard.workPerDiem) || 0;
+                        const oPD = parseFloat(newTimecard.daysOffPerDiem) || 0;
+                        return newTimecard.days.map((d, i) => {
+                          const h = calcDayHours(d);
+                          const paidH = h > 0 ? Math.max(h, guarH) : 0;
+                          const ot = i === sixthIdx ? calcOTBreakdown6thDay(paidH) : calcOTBreakdown(paidH);
+                          const perDiem = (d.perDiemWork ? wPD : 0) + (d.perDiemOff ? oPD : 0);
+                          const dayTotal = ot.hours1x * rate + ot.hours15x * rate * 1.5 + ot.hours2x * rate * 2 + (d.mealPenalty ? rate : 0) + perDiem;
+                          const isWeekend = i === 0 || i === 6;
+                          return (
+                            <td key={i} className={`px-1 py-1.5 text-center border-r border-slate-100 last:border-r-0 ${isWeekend ? "bg-amber-50/60" : ""}`}>
+                              {(paidH > 0 || perDiem > 0)
+                                ? <span className="text-xs font-bold text-emerald-700">${dayTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                                : <span className="text-slate-300 text-xs">—</span>}
+                            </td>
+                          );
+                        });
+                      })()}
+                    </tr>
+                    <tr className="bg-blue-600 border-t-2 border-blue-700">
+                      <td className="px-3 py-2 text-[10px] font-bold text-blue-100 uppercase border-r border-blue-500">Total Hrs</td>
+                      {(() => {
+                        const sixthIdx = get6thDayIndex(newTimecard.days);
+                        const guarH = parseFloat(newTimecard.guarHours) || 0;
+                        return newTimecard.days.map((d, i) => {
+                          const h = calcDayHours(d);
+                          const paidH = h > 0 ? Math.max(h, guarH) : 0;
+                          const is6th = i === sixthIdx;
+                          const ot = is6th ? calcOTBreakdown6thDay(paidH) : calcOTBreakdown(paidH);
+                          const isWeekend = i === 0 || i === 6;
+                          return (
+                            <td key={i} className={`px-1 py-2 text-center border-r border-blue-500 last:border-r-0 ${isWeekend ? "bg-blue-700" : ""}`}>
+                              <div className={`font-bold text-sm ${paidH > 0 ? "text-white" : "text-blue-400"}`}>{paidH > 0 ? paidH : "—"}</div>
+                              {is6th && paidH > 0 && <div className="text-[9px] text-cyan-300 font-bold">6th day</div>}
+                              {ot.hours15x > 0 && <div className="text-[9px] text-amber-300 font-medium">{ot.hours15x}h @1.5×</div>}
+                              {ot.hours2x > 0 && <div className="text-[9px] text-red-300 font-medium">{ot.hours2x}h @2×</div>}
+                            </td>
+                          );
+                        });
+                      })()}
                     </tr>
                   </tbody>
                 </table>
@@ -3218,19 +4288,26 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
             </div>
 
             {/* Sub-tabs */}
-            <div className="flex gap-1 bg-slate-100 p-1 rounded-xl w-fit">
-              <button onClick={() => setMileageSubTab("mileage")}
-                className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${mileageSubTab === "mileage" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                <MapPin size={14} className="inline mr-1.5 -mt-0.5" />Mileage
-              </button>
-              <button onClick={() => setMileageSubTab("vehicle")}
-                className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${mileageSubTab === "vehicle" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                <Wrench size={14} className="inline mr-1.5 -mt-0.5" />Vehicle Expenses
-              </button>
-              <button onClick={() => setMileageSubTab("gas")}
-                className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${mileageSubTab === "gas" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                <Fuel size={14} className="inline mr-1.5 -mt-0.5" />Gas
-              </button>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
+                <button onClick={() => setMileageSubTab("mileage")}
+                  className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${mileageSubTab === "mileage" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
+                  <MapPin size={14} className="inline mr-1.5 -mt-0.5" />Mileage
+                </button>
+                <button onClick={() => setMileageSubTab("vehicle")}
+                  className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${mileageSubTab === "vehicle" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
+                  <Wrench size={14} className="inline mr-1.5 -mt-0.5" />Vehicle Expenses
+                </button>
+                <button onClick={() => setMileageSubTab("gas")}
+                  className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${mileageSubTab === "gas" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
+                  <Fuel size={14} className="inline mr-1.5 -mt-0.5" />Gas
+                </button>
+              </div>
+              {mileageSubTab === "mileage" && allMileageEntries.length > 0 && (
+                <Button onClick={generateMileageReport} className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white">
+                  <FileText size={14} />Generate Tax Report
+                </Button>
+              )}
             </div>
 
             {/* Vehicle manager */}
@@ -3287,6 +4364,13 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                     </div>
                     <div className="space-y-1 lg:col-span-2">
                       <label className="text-[10px] font-bold text-slate-400 uppercase">Production Company</label>
+                      {clients.length > 0 && (
+                        <select value="" onChange={e => { if (e.target.value) setNewMileage(p => ({ ...p, company: e.target.value })); }}
+                          className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 mb-1">
+                          <option value="">— Saved client —</option>
+                          {clients.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                        </select>
+                      )}
                       <Input value={newMileage.company} onChange={e => setNewMileage(p => ({ ...p, company: e.target.value }))} placeholder="e.g. Self, KISSD Honda" />
                     </div>
                     <div className="space-y-1 lg:col-span-2">
@@ -3360,7 +4444,7 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                                 </div>
                                 <div className="flex items-center gap-2">
                                   <span className="text-sm font-bold text-emerald-600">${((parseFloat(m.miles) || 0) * IRS_MILEAGE_RATE).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                                  <Button variant="danger" onClick={() => setMileageLogs(prev => prev.filter(x => x.id !== m.id))} className="!p-1.5"><Trash2 size={13} /></Button>
+                                  <Button variant="danger" onClick={() => { if (window.confirm("Delete this mileage entry?")) setMileageLogs(prev => prev.filter(x => x.id !== m.id)); }} className="!p-1.5"><Trash2 size={13} /></Button>
                                 </div>
                               </Card>
                             ))}
@@ -3449,7 +4533,7 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                             </div>
                             <div className="flex items-center gap-2 shrink-0">
                               <span className="text-sm font-bold text-amber-600">${(parseFloat(v.amount) || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                              <Button variant="danger" onClick={() => setVehicleExpenses(prev => prev.filter(x => x.id !== v.id))} className="!p-1.5"><Trash2 size={13} /></Button>
+                              <Button variant="danger" onClick={() => { if (window.confirm("Delete this vehicle expense?")) setVehicleExpenses(prev => prev.filter(x => x.id !== v.id)); }} className="!p-1.5"><Trash2 size={13} /></Button>
                             </div>
                           </div>
                           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 items-end">
@@ -3561,7 +4645,7 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                             </div>
                             <div className="flex items-center gap-2 shrink-0">
                               <span className="text-sm font-bold text-orange-500">${(parseFloat(g.amount) || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                              <Button variant="danger" onClick={() => setGasLogs(prev => prev.filter(x => x.id !== g.id))} className="!p-1.5"><Trash2 size={13} /></Button>
+                              <Button variant="danger" onClick={() => { if (window.confirm("Delete this gas log entry?")) setGasLogs(prev => prev.filter(x => x.id !== g.id)); }} className="!p-1.5"><Trash2 size={13} /></Button>
                             </div>
                           </div>
                           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 items-end">
