@@ -1,59 +1,56 @@
-// Node.js runtime required for Buffer (used in binary upload + OCR)
-export const runtime = "nodejs";
+import { createSign } from "crypto";
+
+// ── Credential loading ──────────────────────────────────────────────────────
+function getCredentials() {
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+    return JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  }
+  return null;
+}
 
 // ── Access token cache (module-level singleton) ─────────────────────────────
 let cachedToken = null;
 let tokenExpiry = 0;
 
-// Workload Identity Federation token exchange:
-//   Vercel OIDC token → Google STS federated token → SA impersonation access token
 async function getAccessToken() {
   if (cachedToken && Date.now() < tokenExpiry - 60_000) return cachedToken;
 
-  const oidcToken = process.env.VERCEL_OIDC_TOKEN;
-  const saEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const provider = process.env.GOOGLE_WORKLOAD_IDENTITY_PROVIDER; // projects/NUM/locations/global/workloadIdentityPools/POOL/providers/PROVIDER
+  const creds = getCredentials();
+  if (!creds) throw new Error("Service account not configured");
 
-  if (!oidcToken) throw new Error("VERCEL_OIDC_TOKEN not available — enable OIDC in Vercel project settings");
-  if (!saEmail) throw new Error("GOOGLE_SERVICE_ACCOUNT_EMAIL env var not set");
-  if (!provider) throw new Error("GOOGLE_WORKLOAD_IDENTITY_PROVIDER env var not set");
+  const now = Math.floor(Date.now() / 1000);
+  const claim = {
+    iss: creds.client_email,
+    scope: "https://www.googleapis.com/auth/drive",
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
+  };
 
-  // Step 1: Exchange Vercel OIDC token for a Google STS federated access token
-  const stsRes = await fetch("https://sts.googleapis.com/v1/token", {
+  const b64url = (str) => Buffer.from(str).toString("base64url");
+  const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const payload = b64url(JSON.stringify(claim));
+  const signingInput = `${header}.${payload}`;
+
+  const sign = createSign("RSA-SHA256");
+  sign.update(signingInput);
+  const sig = sign.sign(creds.private_key, "base64url");
+
+  const jwt = `${signingInput}.${sig}`;
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-      audience: `//iam.googleapis.com/${provider}`,
-      scope: "https://www.googleapis.com/auth/cloud-platform",
-      requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
-      subject_token: oidcToken,
-      subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: jwt,
     }),
   });
-  const stsData = await stsRes.json();
-  if (!stsData.access_token) throw new Error("STS token exchange failed: " + JSON.stringify(stsData));
+  const data = await res.json();
+  if (!data.access_token) throw new Error("Token exchange failed: " + JSON.stringify(data));
 
-  // Step 2: Impersonate service account to get a Drive-scoped access token
-  const impRes = await fetch(
-    `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${saEmail}:generateAccessToken`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${stsData.access_token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        scope: ["https://www.googleapis.com/auth/drive"],
-        lifetime: "3600s",
-      }),
-    }
-  );
-  const impData = await impRes.json();
-  if (!impData.accessToken) throw new Error("Service account impersonation failed: " + JSON.stringify(impData));
-
-  cachedToken = impData.accessToken;
-  tokenExpiry = new Date(impData.expireTime).getTime();
+  cachedToken = data.access_token;
+  tokenExpiry = Date.now() + (data.expires_in ?? 3600) * 1000;
   return cachedToken;
 }
 
@@ -63,12 +60,12 @@ export async function POST(request) {
     const body = await request.json();
     const { action, ...params } = body;
 
-    // Check if WIF credentials are configured
+    // Check if service account is configured
     if (action === "ping") {
-      const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-      const provider = process.env.GOOGLE_WORKLOAD_IDENTITY_PROVIDER;
-      if (!email || !provider) return Response.json({ ok: false, error: "not_configured" });
-      return Response.json({ ok: true, email });
+      const creds = getCredentials();
+      if (!creds) return Response.json({ ok: false, error: "not_configured" });
+      if (!creds.client_email || !creds.private_key) return Response.json({ ok: false, error: "invalid_credentials" });
+      return Response.json({ ok: true, email: creds.client_email });
     }
 
     const token = await getAccessToken();
@@ -228,9 +225,8 @@ export async function GET(request) {
   const action = url.searchParams.get("action");
 
   if (action === "ping") {
-    const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-    const provider = process.env.GOOGLE_WORKLOAD_IDENTITY_PROVIDER;
-    return Response.json({ ok: !!(email && provider), email: email || null });
+    const creds = getCredentials();
+    return Response.json({ ok: !!creds && !!(creds.client_email && creds.private_key) });
   }
 
   if (action === "proxy") {
