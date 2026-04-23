@@ -8,7 +8,7 @@ A modern, full-featured financial tracking application designed for freelancers,
 - **Upload & Track Invoices**: Digitally store and organize all invoices with client information
 - **OCR Extraction**: Automatically extract invoice details (company, amount, date, invoice number) from PDF/image uploads using AI vision
 - **Payment Status**: Track which invoices are paid vs. unpaid
-- **Google Drive Integration**: Securely store invoice files in Google Drive with automatic syncing
+- (coming later) **Google Drive Integration**: Securely store invoice files in Google Drive with automatic syncing
 
 ### ⏱️ Timecard Management  
 - **Detailed Timecards**: Create comprehensive timecards with daily breakdowns
@@ -42,9 +42,9 @@ A modern, full-featured financial tracking application designed for freelancers,
 - **Styling**: TailwindCSS + PostCSS
 - **UI Components**: Custom components with Lucide React icons
 - **Backend**: Next.js API Routes
-- **Storage**: Google Drive API integration
+- (coming later) **Storage**: Google Drive API integration
 - **AI/OCR**: OpenAI GPT-4o Vision (for invoice extraction)
-- **Authentication**: Google Service Account (JWT-based)
+- (coming later) **Authentication**: Google Service Account (JWT-based)
 
 ---
 
@@ -52,7 +52,7 @@ A modern, full-featured financial tracking application designed for freelancers,
 
 ### Prerequisites
 - **Node.js v18 or higher** — download from [nodejs.org](https://nodejs.org) (choose the LTS version). npm is included automatically.
-- Google Cloud Project with Drive API enabled *(optional — only needed for Drive sync)*
+- (coming later) Google Cloud Project with Drive API enabled *(optional — only needed for Drive sync)*
 - OpenAI API key *(optional — only needed for OCR invoice extraction)*
 
 > **Quick check:** Open Terminal and run `node -v` and `npm -v`. If both print version numbers you're good to go.
