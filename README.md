@@ -51,12 +51,19 @@ A modern, full-featured financial tracking application designed for freelancers,
 ## Getting Started
 
 ### Prerequisites
-- Node.js (v16 or higher)
-- npm or yarn
-- Google Cloud Project with Drive API enabled
-- OpenAI API key (optional, for OCR invoice extraction)
+- **Node.js v18 or higher** — download from [nodejs.org](https://nodejs.org) (choose the LTS version). npm is included automatically.
+- Google Cloud Project with Drive API enabled *(optional — only needed for Drive sync)*
+- OpenAI API key *(optional — only needed for OCR invoice extraction)*
 
-### Installation
+> **Quick check:** Open Terminal and run `node -v` and `npm -v`. If both print version numbers you're good to go.
+
+### Quickstart (macOS — no Terminal needed)
+
+1. Download or clone the repo
+2. Open a Terminal in the project folder and run `npm install` once to install dependencies
+3. After that, just **double-click `Start App.command`** in Finder to launch the app — it opens automatically in your browser
+
+### Manual Installation
 
 1. **Clone the repository** (or navigate to the project directory):
    ```bash
