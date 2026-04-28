@@ -133,8 +133,23 @@ function createWindow() {
     },
   });
 
-  // Open external links in the system browser instead of a new Electron window
+  // Handle new window requests:
+  // - about:blank (used by timecard/invoice print popups) → allow as BrowserWindow
+  // - real URLs → open in system browser
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url === "about:blank" || url === "") {
+      return {
+        action: "allow",
+        overrideBrowserWindowOptions: {
+          width: 900,
+          height: 700,
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+          },
+        },
+      };
+    }
     shell.openExternal(url);
     return { action: "deny" };
   });
