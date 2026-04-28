@@ -50,7 +50,7 @@ echo ""
 
 # 4. Build the Electron DMG
 echo "▶ Building DMG installer…"
-npx electron-builder --mac dmg
+npx electron-builder --mac dmg --universal
 echo ""
 
 echo "══════════════════════════════════════════"
