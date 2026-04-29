@@ -6,9 +6,15 @@ on:
     tags:
       - "v*"
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-windows:
     runs-on: windows-latest
+
+    permissions:
+      contents: write
 
     steps:
       # ── Checkout ────────────────────────────────────────────────────────────
@@ -39,11 +45,9 @@ jobs:
             Copy-Item -Recurse -Force public .next\standalone\public
           }
 
-      # ── Build Windows NSIS installer ─────────────────────────────────────────
+      # ── Build Windows NSIS installer (no auto-publish) ──────────────────────
       - name: Build Windows installer
-        run: npx electron-builder --win nsis --x64
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win nsis --x64 --publish never
 
       # ── Upload EXE to the GitHub Release ────────────────────────────────────
       - name: Upload Windows installer to release
