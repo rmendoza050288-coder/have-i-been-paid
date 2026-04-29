@@ -154,6 +154,43 @@ function createWindow() {
     return { action: "deny" };
   });
 
+  // After a print popup window finishes loading its document.write() content,
+  // inject a fixed "✕ Close" button so the user can dismiss it without
+  // hunting for the window chrome close button.
+  mainWindow.webContents.on("did-create-window", (childWin) => {
+    childWin.webContents.on("did-finish-load", () => {
+      childWin.webContents.executeJavaScript(`
+        (function () {
+          if (document.getElementById('__electron_close_btn__')) return;
+          const btn = document.createElement('button');
+          btn.id = '__electron_close_btn__';
+          btn.textContent = '✕  Close';
+          btn.style.cssText = [
+            'position:fixed',
+            'top:12px',
+            'right:16px',
+            'z-index:99999',
+            'background:#1e293b',
+            'color:#f8fafc',
+            'border:none',
+            'border-radius:8px',
+            'padding:8px 18px',
+            'font-size:13px',
+            'font-family:system-ui,sans-serif',
+            'font-weight:600',
+            'cursor:pointer',
+            'box-shadow:0 2px 8px rgba(0,0,0,0.35)',
+            'letter-spacing:0.3px',
+          ].join(';');
+          btn.onmouseenter = () => btn.style.background = '#334155';
+          btn.onmouseleave = () => btn.style.background = '#1e293b';
+          btn.onclick = () => window.close();
+          document.body.appendChild(btn);
+        })();
+      `).catch(() => {});
+    });
+  });
+
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
