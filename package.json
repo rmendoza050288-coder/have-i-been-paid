@@ -58,6 +58,20 @@
         }
       ]
     },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
     "dmg": {
       "title": "Have I Been Paid? ${version}"
     }

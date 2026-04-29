@@ -1,0 +1,54 @@
+name: Build Windows Installer
+
+# Runs automatically when a version tag is pushed (e.g. v1.1.2)
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Node.js ─────────────────────────────────────────────────────────────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      # ── Install dependencies ─────────────────────────────────────────────────
+      - name: Install dependencies
+        run: npm ci
+
+      # ── Build Next.js standalone ─────────────────────────────────────────────
+      - name: Build Next.js
+        run: npm run build
+
+      # ── Copy static assets into standalone ──────────────────────────────────
+      - name: Copy static assets
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse -Force .next\static .next\standalone\.next\static
+          if (Test-Path public) {
+            Copy-Item -Recurse -Force public .next\standalone\public
+          }
+
+      # ── Build Windows NSIS installer ─────────────────────────────────────────
+      - name: Build Windows installer
+        run: npx electron-builder --win nsis --x64
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Upload EXE to the GitHub Release ────────────────────────────────────
+      - name: Upload Windows installer to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
