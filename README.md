@@ -1,203 +1,198 @@
-# Have I Been Paid?
+<p align="center">
+  <img src="docs/screenshots/app-icon.png" width="120" alt="Have I Been Paid? icon" />
+</p>
 
-A modern, full-featured financial tracking application designed for freelancers, contractors, and gig workers to manage invoices, timecards, expenses, and payments all in one place.
+<h1 align="center">Have I Been Paid?</h1>
+
+<p align="center">
+  A modern, full-featured financial tracking app for freelancers, contractors, and gig workers.<br/>
+  Track invoices, timecards, expenses, mileage, and kit rentals — all in one place.
+</p>
+
+<p align="center">
+  <a href="https://github.com/rmendoza050288-coder/have-i-been-paid/releases/latest">
+    <img src="https://img.shields.io/github/v/release/rmendoza050288-coder/have-i-been-paid?label=version&color=blue" alt="Latest release" />
+  </a>
+  &nbsp;
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey" alt="Platform" />
+  &nbsp;
+  <img src="https://img.shields.io/badge/built%20with-Next.js%2014-black" alt="Next.js" />
+</p>
+
+---
+
+## Screenshots
+
+### Invoices Dashboard
+![Invoices dashboard](docs/screenshots/invoices.png)
+
+### Create Invoice (with Logo Upload)
+![Create Invoice modal](docs/screenshots/create-invoice.png)
+
+### Timecards Dashboard
+![Timecards dashboard](docs/screenshots/timecards.png)
+
+### Timecard Entry Form
+![Timecard entry form](docs/screenshots/timecard-form.png)
+
+### Purchases & Equipment
+![Purchases tab](docs/screenshots/purchases.png)
+
+### Mileage & Vehicle Expenses
+![Mileage tab](docs/screenshots/mileage.png)
+
+---
+
+## Download
+
+| Platform | Link |
+|----------|------|
+| macOS (Universal — Apple Silicon + Intel) | [Have I Been Paid-1.1.3-universal.dmg](https://github.com/rmendoza050288-coder/have-i-been-paid/releases/latest) |
+| Windows (x64) | [Have I Been Paid Setup 1.1.3.exe](https://github.com/rmendoza050288-coder/have-i-been-paid/releases/latest) |
+
+---
 
 ## Features
 
 ### 📋 Invoice Management
-- **Upload & Track Invoices**: Digitally store and organize all invoices with client information
-- **OCR Extraction**: Automatically extract invoice details (company, amount, date, invoice number) from PDF/image uploads using AI vision
-- **Payment Status**: Track which invoices are paid vs. unpaid
-- (coming later) **Google Drive Integration**: Securely store invoice files in Google Drive with automatic syncing
+- **Create & Download Invoices** — Generate clean, print-ready invoices directly in the app
+- **Logo Support** *(v1.1.3)* — Upload your own logo to brand every invoice
+- **Upload & Track** — Digitally store and organize all invoices with client information
+- **OCR Extraction** — Automatically extract invoice details from PDF/image uploads using AI vision
+- **Payment Status** — Track which invoices are Paid, Unpaid, or Overdue
+- **Google Drive Sync** — Securely back up invoice files to your Google Drive
 
-### ⏱️ Timecard Management  
-- **Detailed Timecards**: Create comprehensive timecards with daily breakdowns
-- **Multi-Rate Tracking**: Support for different pay rates and multipliers (1x, 1.5x, 2x hours)
-- **Meal Penalties**: Track meal penalty violations
-- **Mileage Tracking**: Log mileage for job sites (for tax deductions)
-- **Digital Signatures**: Sign timecards with custom signature fonts
+### ⏱️ Timecard Management
+- **Detailed Timecards** — Create weekly timecards with per-day call/wrap/meal-break times
+- **Multi-Rate Hours** — Auto-calculate straight, 1.5×, and 2× overtime
+- **Guaranteed Hours** — Supports guaranteed minimums and meal penalty tracking
+- **Mileage per Job** — Log mileage on each timecard day for IRS write-off tracking
+- **Digital Signatures** — Sign timecards with custom handwriting-style fonts
 
-### 💼 Job Management
-- **Project Tracking**: Create and organize jobs/projects
-- **Job Classification**: Categorize roles (Data Wrangler, Digital Image Technician, etc.)
-- **Link Timecards & Invoices**: Associate timecards and invoices with specific jobs
+### 💼 Job & Client Management
+- **Jobs / Shows** — Create and organize projects; link timecards and invoices to each job
+- **Saved Clients** — Store client details for fast invoice fill-in
+- **Classifications** — Categorize roles (DP, Gaffer, Data Wrangler, DIT, etc.)
 
-### 🛍️ Expense Management
-- **Equipment Tracking**: Log equipment purchases with serial numbers and vendors
-- **Expendable Supplies**: Track consumable supplies
-- **Vehicle Expenses**: Record fuel, tires, maintenance, and other vehicle-related costs
-- **Receipt Storage**: Attach receipts and photos to expense records
+### 🛍️ Purchases & Equipment
+- **Expendables** — Log consumable supplies with vendor, amount, and receipt notes
+- **Equipment** — Track gear purchases with serial numbers
+- **Kit / Rental Packages** — Define kit packages with daily/weekly rates; add them as invoice line items in one click
 
-### 📊 Analytics & Insights
-- **Payment Summary**: View all invoices and their payment status at a glance
-- **Earnings Dashboard**: Track total earned, paid, and unpaid amounts
-- **Expense Breakdown**: Categorize and analyze deductible expenses
-- **Mileage Summary**: Calculate total mileage for tax reporting
+### 🚗 Mileage & Vehicle Expenses
+- **Mileage Log** — Log trips with purpose, vehicle, and production company
+- **IRS Rate Calculation** — Auto-calculates write-off value at the current IRS rate
+- **Vehicle Expenses** — Record fuel, maintenance, tires, and other vehicle costs
+- **Gas Log** — Track fuel fill-ups per vehicle
+
+### 📊 Analytics & Reporting
+- **Earnings Dashboard** — See total billed, received, outstanding, and estimated taxes at a glance
+- **Year Filter** — Instantly switch between tax years
+- **Mileage Tax Report** — Generate a printable IRS mileage summary
+- **Google Drive Sync** — One-click backup / restore to keep data safe across devices
 
 ---
 
 ## Tech Stack
 
-- **Frontend**: React 18 with Next.js 14
-- **Styling**: TailwindCSS + PostCSS
-- **UI Components**: Custom components with Lucide React icons
-- **Backend**: Next.js API Routes
-- (coming later) **Storage**: Google Drive API integration
-- **AI/OCR**: OpenAI GPT-4o Vision (for invoice extraction)
-- (coming later) **Authentication**: Google Service Account (JWT-based)
+| Layer | Technology |
+|-------|-----------|
+| Frontend | React 18 + Next.js 14 |
+| Styling | TailwindCSS |
+| Icons | Lucide React |
+| Desktop shell | Electron 33 |
+| Storage | Local JSON + Google Drive API |
+| OCR | OpenAI GPT-4o Vision |
 
 ---
 
 ## Getting Started
 
-### Prerequisites
-- **Node.js v18 or higher** — download from [nodejs.org](https://nodejs.org) (choose the LTS version). npm is included automatically.
-- (coming later) Google Cloud Project with Drive API enabled *(optional — only needed for Drive sync)*
-- OpenAI API key *(optional — only needed for OCR invoice extraction)*
+### Option A — Desktop App (recommended)
 
-> **Quick check:** Open Terminal and run `node -v` and `npm -v`. If both print version numbers you're good to go.
+Download the installer for your platform from the [Releases page](https://github.com/rmendoza050288-coder/have-i-been-paid/releases/latest). No Node.js required.
 
-### Quickstart (macOS — no Terminal needed)
+- **macOS** → open the `.dmg`, drag the app to Applications, right-click → Open on first launch (Gatekeeper)
+- **Windows** → run the `.exe` installer, the app launches automatically
 
-1. Download or clone the repo
-2. Open a Terminal in the project folder and run `npm install` once to install dependencies
-3. After that, just **double-click `Start App.command`** in Finder to launch the app — it opens automatically in your browser
+### Option B — Run from source
 
-### Manual Installation
+**Prerequisites:** Node.js 18+
 
-1. **Clone the repository** (or navigate to the project directory):
-   ```bash
-   cd have-i-been-paid
-   ```
-
-2. **Install dependencies**:
-   ```bash
-   npm install
-   ```
-
-3. **Set up environment variables** - Create a `.env.local` file:
-   ```env
-   # Google Drive API
-   GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account","project_id":"...","private_key":"...","client_email":"..."}'
-   
-   # Optional: OpenAI API for invoice OCR
-   OPENAI_API_KEY=sk-...
-   ```
-
-4. **Run the development server**:
-   ```bash
-   npm run dev
-   ```
-
-5. **Open in browser**:
-   ```
-   http://localhost:3000
-   ```
-
-### Production Deployment
-
-Build and start the production server:
 ```bash
-npm run build
-npm start
+# 1. Clone
+git clone https://github.com/rmendoza050288-coder/have-i-been-paid.git
+cd have-i-been-paid
+
+# 2. Install dependencies
+npm install
+
+# 3. (Optional) create .env.local for Drive sync and OCR
+# GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
+# OPENAI_API_KEY=sk-...
+
+# 4. Start dev server
+npm run dev
+# → http://localhost:3000
 ```
 
----
-
-## Usage
-
-### Adding Invoices
-1. Navigate to the Invoices section
-2. Upload an invoice file (PDF or image)
-3. The app will automatically extract key details if OCR is enabled
-4. Review and edit extracted data as needed
-5. Set payment status and save
-
-### Creating Timecards
-1. Go to Timecards section
-2. Enter company, job name, and classification
-3. Fill in daily call times, meal breaks, and work wrap times
-4. System automatically calculates paid hours with proper multipliers
-5. Add signature and save
-
-### Tracking Expenses
-1. Navigate to Purchases or Vehicle Expenses
-2. Enter vendor, amount, category, and date
-3. Upload receipt if available
-4. Associate with a job (optional)
-5. Save for tax deduction tracking
-
-### Managing Jobs
-1. Create a new job with name and classification
-2. Link timecards and invoices to the job
-3. Track all earnings and expenses per job
-4. Use for project-based reporting
+**macOS shortcut:** After `npm install`, just double-click **`Start App.command`** in Finder — it starts the server and opens the browser for you.
 
 ---
 
-## API Endpoints
+## Building the Installers
 
-### Drive API
-- `GET /api/drive` - Fetch files from Google Drive
-- `POST /api/drive` - Upload files to Google Drive
+```bash
+# Build Next.js, then package for macOS (universal DMG)
+bash build-installer.sh
 
-### File Operations
-- `GET /api/files` - List all stored files
-- `DELETE /api/files/[id]` - Delete a file
-
-### Invoice OCR
-- `POST /api/extract` - Extract invoice data from image/PDF using AI
-
----
-
-## Data Structure
-
-All data is stored in `data.json` with the following collections:
-
-```json
-{
-  "invoices": [...],
-  "timecards": [...],
-  "jobs": [...],
-  "purchases": [...],
-  "classifications": [...],
-  "mileageLogs": [...],
-  "vehicleExpenses": [...],
-  "vehicles": [],
-  "gasLogs": []
-}
+# Windows NSIS installer (cross-compile from macOS via Wine)
+npx electron-builder --win nsis --x64
 ```
 
----
-
-## Configuration
-
-### Tailwind CSS
-Custom configuration in `tailwind.config.js` for theme and styling.
-
-### Next.js Configuration
-See `next.config.js` for build and runtime configurations.
+Output files land in `dist/`.
 
 ---
 
-## Backup & Data Management
+## Data & Backup
 
-- **Local Backup**: Data is stored in `/offline_files/Have I Been Paid_/` directory
-- **Google Drive Sync**: Files can be automatically backed up to Google Drive
-- **Export Options**: Export invoices and timecards as needed
+All data lives in `offline_files/Have I Been Paid_/data.json` (split by year). Use the **Backup** button in the app to export a `.json` snapshot, or connect Google Drive for automatic cloud sync.
 
 ---
 
 ## Troubleshooting
 
-### Google Drive Authentication Issues
-- Verify your service account JSON credentials are correct
-- Ensure the service account has Drive API permissions
-- Check that `GOOGLE_SERVICE_ACCOUNT_JSON` environment variable is properly set
+| Problem | Fix |
+|---------|-----|
+| macOS "app is damaged" warning | Right-click → Open on first launch |
+| Drive sync not working | Paste your shared folder URL in Settings → Your Drive Folder |
+| OCR not extracting data | Add `OPENAI_API_KEY` to `.env.local` |
+| App won't start from source | Run `npm install` then `npm run dev` |
 
-### OCR Not Working
-- Ensure `OPENAI_API_KEY` is set in environment variables
-- Verify OpenAI API account has credits
+---
+
+## Changelog
+
+### v1.1.3 — May 1, 2026
+- Add logo upload support on invoices (PNG, JPG, SVG — embedded in generated HTML)
+
+### v1.1.2
+- Kit / Rental Packages tab with daily and weekly rate support
+- Add packages as line items directly from the invoice generator
+
+### v1.1.1
+- Mileage tax report generator
+- Vehicle and gas log tracking
+
+### v1.1.0
+- Initial public release
+
+---
+
+## License
+
+MIT
+
 - Check that image/PDF quality is sufficient for OCR
 
 ### Data Not Persisting
