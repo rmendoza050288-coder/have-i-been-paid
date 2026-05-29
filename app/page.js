@@ -1268,6 +1268,13 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
     const gross = (e.total || 0).toFixed(2);
     const perD = (e.perDiemTotal || 0).toFixed(2);
     const mpPay = (e.mealPenaltyPay || 0).toFixed(2);
+    const sigFont = e.signatureFont || "Dancing Script";
+    const sigName = e.signatureName || e.workerName || "";
+    const sigDate = e.signatureDate ? new Date(e.signatureDate + "T12:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) : "";
+    const sigHtml = sigName
+      ? `<div style="font-family:'${sigFont}',cursive;font-size:28px;color:#1e293b;line-height:1.2;">${sigName}</div><div style="font-size:9px;color:#555;margin-top:1px;">${sigDate}</div>`
+      : `<div style="min-height:36px;"></div>`;
+    const sigFontImport = `@import url('https://fonts.googleapis.com/css2?family=${encodeURIComponent(sigFont).replace(/%20/g,'+')}&display=swap');`;
     const C = "border:1px solid #000;";
     const FD = "border:1px solid #000;padding:3px 4px;font-size:9px;vertical-align:middle;";
     const printStyle = "@page{size:letter landscape;margin:0.4in;}@media print{body{padding:0;}print-color-adjust:exact;-webkit-print-color-adjust:exact;}";
@@ -1300,6 +1307,7 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
           </tr><tr style="${bg}"><td style="${C}padding:2px 4px;font-size:9px;border-top:none;">${m2}</td></tr>`;
       }).join("");
       html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>CAPS Crew Time Card</title><style>
+${sigFontImport}
 *{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,Helvetica,sans-serif;font-size:9px;color:#000;background:#fff;padding:10px 14px;}
 table{width:100%;border-collapse:collapse;}td,th{border:1px solid #000;padding:3px 4px;vertical-align:top;}
 .nb{border:none!important;}.lbl{font-size:7px;font-weight:700;text-transform:uppercase;letter-spacing:0.2px;color:#444;display:block;margin-bottom:1px;}
@@ -1376,7 +1384,16 @@ ${printStyle}</style></head><body>
   <td><span class="lbl">AICP #</span></td>
   <td></td>
 </tr></table>
-<div style="display:flex;gap:20px;margin-top:8px;"><div style="flex:1;">EMPLOYEE SIGNATURE <span style="display:inline-block;width:62%;border-bottom:1px solid #000;">&nbsp;</span></div><div style="flex:1;">APPROVED <span style="display:inline-block;width:72%;border-bottom:1px solid #000;">&nbsp;</span></div></div>
+<div style="display:flex;gap:20px;margin-top:8px;">
+  <div style="flex:1;">
+    ${sigHtml}
+    <div style="border-top:1px solid #000;margin-top:4px;padding-top:3px;font-size:8px;font-weight:700;">EMPLOYEE SIGNATURE</div>
+  </div>
+  <div style="flex:1;">
+    <div style="min-height:36px;"></div>
+    <div style="border-top:1px solid #000;margin-top:4px;padding-top:3px;font-size:8px;font-weight:700;">APPROVED</div>
+  </div>
+</div>
 <p style="font-size:7px;color:#444;line-height:1.5;margin-top:6px;">Attention all CA employees: Effective 2/14/2014, CAPS, A Cast &amp; Crew Company has established a Medical Provider Network (MPN) for all work-related injuries and/or illnesses. In the event of an injury, your care will be directed to a physician within the MPN and you have the right to pre-designate a doctor. For further information, please email MPN@capspayroll.com.</p>
 </body></html>`;
 
@@ -1413,6 +1430,7 @@ ${printStyle}</style></head><body>
         </tr>`;
       }).join("");
       html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>EP Non-Union Crew Time Card</title><style>
+${sigFontImport}
 *{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,Helvetica,sans-serif;font-size:9px;color:#000;background:#fff;padding:10px 14px;}
 table{width:100%;border-collapse:collapse;}td,th{border:1px solid #000;padding:2px 3px;vertical-align:middle;}
 .nb{border:none!important;}.lbl{font-size:7px;font-weight:700;text-transform:uppercase;color:#444;display:block;margin-bottom:1px;}
@@ -1488,7 +1506,16 @@ ${printStyle}</style></head><body>
   </tr>
 </tfoot></table>
 <p style="font-size:7.5px;color:#444;margin-top:8px;">IN SIGNING BELOW, THE EMPLOYEE/LOAN-OUT AND SUPERVISOR/PRODUCTION APPROVER EACH CERTIFY THAT THE INFORMATION PROVIDED IS CORRECT AND COMPLETE.</p>
-<div style="display:flex;gap:20px;margin-top:6px;"><div style="flex:1.5;">EMPLOYEE/LOAN-OUT SIGNATURE &nbsp;X <span style="display:inline-block;width:55%;border-bottom:1px solid #000;">&nbsp;</span></div><div style="flex:1;">APPROVED &nbsp;X <span style="display:inline-block;width:60%;border-bottom:1px solid #000;">&nbsp;</span></div></div>
+<div style="display:flex;gap:20px;margin-top:6px;">
+  <div style="flex:1.5;">
+    ${sigHtml}
+    <div style="border-top:1px solid #000;margin-top:4px;padding-top:3px;font-size:8px;font-weight:700;">EMPLOYEE/LOAN-OUT SIGNATURE &nbsp;X</div>
+  </div>
+  <div style="flex:1;">
+    <div style="min-height:36px;"></div>
+    <div style="border-top:1px solid #000;margin-top:4px;padding-top:3px;font-size:8px;font-weight:700;">APPROVED &nbsp;X</div>
+  </div>
+</div>
 </body></html>`;
 
     // ── GreenSlate Crew Time Card ─────────────────────────────────────────────
@@ -1523,6 +1550,7 @@ ${printStyle}</style></head><body>
         </tr>`;
       }).join("");
       html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>GreenSlate Crew Time Card</title><style>
+${sigFontImport}
 *{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,Helvetica,sans-serif;font-size:9px;color:#000;background:#fff;padding:10px 14px;}
 table{width:100%;border-collapse:collapse;}td,th{border:1px solid #000;padding:2px 3px;vertical-align:top;}
 .nb{border:none!important;}.lbl{font-size:7px;font-weight:700;text-transform:uppercase;color:#444;display:block;margin-bottom:1px;}
@@ -1627,9 +1655,18 @@ ${printStyle}</style></head><body>
   </td>
 </tr></table>
 <div style="display:flex;gap:20px;margin-top:8px;border-top:1px solid #000;padding-top:6px;">
-  <div style="flex:1;font-size:8px;font-weight:700;">Employee Signature &amp; Date <span style="display:inline-block;width:48%;border-bottom:1px solid #000;">&nbsp;</span></div>
-  <div style="flex:1;font-size:8px;font-weight:700;">Department Head Signature &amp; Date <span style="display:inline-block;width:40%;border-bottom:1px solid #000;">&nbsp;</span></div>
-  <div style="flex:1;font-size:8px;font-weight:700;">Authorized Signature &amp; Date <span style="display:inline-block;width:45%;border-bottom:1px solid #000;">&nbsp;</span></div>
+  <div style="flex:1;">
+    ${sigHtml}
+    <div style="border-top:1px solid #000;margin-top:4px;padding-top:3px;font-size:8px;font-weight:700;">Employee Signature &amp; Date</div>
+  </div>
+  <div style="flex:1;">
+    <div style="min-height:36px;"></div>
+    <div style="border-top:1px solid #000;margin-top:4px;padding-top:3px;font-size:8px;font-weight:700;">Department Head Signature &amp; Date</div>
+  </div>
+  <div style="flex:1;">
+    <div style="min-height:36px;"></div>
+    <div style="border-top:1px solid #000;margin-top:4px;padding-top:3px;font-size:8px;font-weight:700;">Authorized Signature &amp; Date</div>
+  </div>
 </div>
 </body></html>`;
     }
@@ -1639,10 +1676,8 @@ ${printStyle}</style></head><body>
     if (!w) { alert("Please allow pop-ups for this site to generate the timecard."); return; }
     w.document.write(html);
     w.document.close();
-    setTimeout(() => w.print(), 400);
+    setTimeout(() => w.print(), 900);
   };
-
-  // ── INVOICE GENERATOR ───────────────────────────────────────────────────────
   const openInvoiceGenerator = () => {
     const today = new Date().toISOString().split("T")[0];
     const dueD = new Date(); dueD.setDate(dueD.getDate() + 30);
