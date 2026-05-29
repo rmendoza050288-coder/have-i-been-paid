@@ -68,8 +68,8 @@
 - **Guaranteed Hours** — Supports guaranteed minimums and meal penalty tracking
 - **Day Type Tags** — Mark each day as Work, Hold, Travel, or Off for accurate payroll and calendar display
 - **Mileage per Job** — Log mileage on each timecard day for IRS write-off tracking
-- **Digital Signatures** — Sign timecards with custom handwriting-style fonts
-- **Payroll Portal Export** *(v1.5.0)* — Generate print-ready official timecards in EP Non-Union, GreenSlate, and CAPS formats — pre-filled with your entered data, ready to print or save as PDF
+- **Digital Signatures** — Sign timecards with custom handwriting-style fonts; signature auto-populates the Employee Signature line on all exported payroll timecard formats
+- **Payroll Portal Export** *(v1.5.0)* — Generate print-ready official timecards in EP Non-Union, GreenSlate, and CAPS formats — pre-filled with your entered data and digital signature, ready to print or save as PDF
 
 ### 💼 Job & Client Management
 - **Jobs / Shows** — Create and organize projects; link timecards and invoices to each job
@@ -188,6 +188,7 @@ All data lives in `offline_files/Have I Been Paid_/data.json` (split by year). U
   - Entertainment Partners (EP) Non-Union Crew Time Card
   - GreenSlate Crew Time Card (with Gross Hours, Other Earnings, Per Diem, and Total Gross sections)
   - CAPS (Cast & Crew) Crew Time Card (with AICP fields, dual-meal rows, and CA MPN notice)
+- **Digital Signatures on Payroll Timecards** — Your saved handwriting-style signature (name + date in cursive font) is automatically placed on the Employee Signature line of all three exported timecard formats
 
 ### v1.1.3 — May 1, 2026
 - Add logo upload support on invoices (PNG, JPG, SVG — embedded in generated HTML)
