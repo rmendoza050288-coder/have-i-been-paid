@@ -32,6 +32,9 @@ import {
   Lock,
   LockOpen,
   Layers,
+  Calendar,
+  ChevronLeft,
+  FileDown,
 } from "lucide-react";
 
 const Card = ({ children, className = "" }) => (
@@ -334,7 +337,7 @@ function initWeekDays(weekEnding) {
   return Array.from({ length: 7 }, (_, i) => {
     const d = new Date(sat);
     d.setDate(sat.getDate() - (6 - i));
-    return { date: d.toISOString().split("T")[0], day: DAY_NAMES[d.getDay()], call: "", meal1Out: "", meal1In: "", meal2Out: "", meal2In: "", wrap: "", mealPenalty: false, perDiemWork: false, perDiemOff: false, totalHours: 0, hours1x: 0, hours15x: 0, hours2x: 0 };
+    return { date: d.toISOString().split("T")[0], day: DAY_NAMES[d.getDay()], type: "work", call: "", meal1Out: "", meal1In: "", meal2Out: "", meal2In: "", wrap: "", mealPenalty: false, perDiemWork: false, perDiemOff: false, totalHours: 0, hours1x: 0, hours15x: 0, hours2x: 0 };
   });
 }
 
@@ -417,6 +420,55 @@ function get6thDayIndex(days) {
 const TAX_RATE = 0.25;
 const IRS_MILEAGE_RATE = 0.70; // 2025 IRS standard mileage rate ($/mi)
 
+const PAYMENT_TERMS = [
+  { label: "Net 15", days: 15 },
+  { label: "Net 30", days: 30 },
+  { label: "Net 45", days: 45 },
+  { label: "Net 60", days: 60 },
+  { label: "Custom", days: null },
+];
+
+// Calculate due date from invoice date + payment terms
+function dueDateFromTerms(invoiceDate, terms) {
+  const t = PAYMENT_TERMS.find(p => p.label === terms);
+  if (!t || t.days == null) return null;
+  const d = new Date(invoiceDate + "T12:00");
+  if (isNaN(d)) return null;
+  d.setDate(d.getDate() + t.days);
+  return d.toISOString().split("T")[0];
+}
+
+// Calculate late fee for an invoice
+function calcLateFee(inv) {
+  if (!inv.lateFeeType || inv.lateFeeType === "none") return 0;
+  const effectiveStatus = computeInvoiceStatus(inv);
+  if (effectiveStatus === "Paid") return 0;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const defaultDue = inv.dueDate || (() => { const d = new Date(inv.date); d.setDate(d.getDate() + 30); return d.toISOString().split("T")[0]; })();
+  const due = new Date(defaultDue); due.setHours(0, 0, 0, 0);
+  const daysOverdue = Math.max(0, Math.round((today - due) / 86400000));
+  if (daysOverdue === 0) return 0;
+  const amount = parseFloat(inv.amount) || 0;
+  const received = parseFloat(inv.amountReceived) || 0;
+  const balance = Math.max(0, amount - received);
+  if (balance === 0) return 0;
+  if (inv.lateFeeType === "flat") return parseFloat(inv.lateFeeRate) || 0;
+  if (inv.lateFeeType === "daily") {
+    const dailyRate = (parseFloat(inv.lateFeeRate) || 0) / 100;
+    return parseFloat((balance * dailyRate * daysOverdue).toFixed(2));
+  }
+  return 0;
+}
+
+// Derive display status from invoice data (partial payments override manual status)
+function computeInvoiceStatus(inv) {
+  const received = parseFloat(inv.amountReceived) || 0;
+  const total = parseFloat(inv.amount) || 0;
+  if (received > 0 && total > 0 && received >= total) return "Paid";
+  if (received > 0 && received < total) return "Partially Paid";
+  return inv.status || "Unpaid";
+}
+
 // Day rate → hourly rate conversion
 // 10hr guarantee: 8h@1x + 2h@1.5x = 11 × hourly
 // 12hr guarantee: 8h@1x + 4h@1.5x = 14 × hourly
@@ -450,6 +502,10 @@ export default function App() {
   const [previewItem, setPreviewItem] = useState(null);
   const [newTimecard, setNewTimecard] = useState(() => { const we = getNextSaturday(); return { company: "", jobName: "", jobClassification: "", guarHours: "10", rate: "", dayRate: "", dayRateType: "10", weekEnding: we, days: initWeekDays(we), description: "", jobId: "", workerName: "", workerEmail: "", last4SS: "", mileage: "", workPerDiem: "", daysOffPerDiem: "", signatureFont: "Dancing Script", signatureDate: new Date().toISOString().split("T")[0] }; });
   const [editingTimecard, setEditingTimecard] = useState(null);
+  const [calMonth, setCalMonth] = useState(new Date().getMonth());
+  const [calYear, setCalYear] = useState(new Date().getFullYear());
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportEntry, setExportEntry] = useState(null);
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
   const [jobs, setJobs] = useState([]);
   const [classifications, setClassifications] = useState([]);
@@ -954,6 +1010,10 @@ export default function App() {
         status: "Pending",
         jobId: uploadJobId || "",
         locked: true,
+        paymentTerms: "Net 30",
+        lateFeeType: "none",
+        lateFeeRate: 0,
+        amountReceived: 0,
         timestamp: Date.now(),
       }, ...prev]);
       if (uploadJobId) setExpandedJobs(prev => { const n = new Set(prev); n.add(uploadJobId); return n; });
@@ -1193,6 +1253,395 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
     setTimecards(prev => prev.filter(t => t.id !== id));
   };
 
+  // ── PAYROLL PORTAL CSV EXPORT ───────────────────────────────────────────────
+  const generatePayrollTimecard = (entry, format) => {
+    const e = entry || {};
+    const days = Array.isArray(e.days) ? e.days : [];
+    const fD = iso => { if (!iso) return ""; try { return new Date(iso + "T12:00").toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "2-digit" }); } catch { return iso; } };
+    const fT = v => v || "";
+    const fn = v => { const n = parseFloat(v) || 0; return n ? (n % 1 === 0 ? String(n) : n.toFixed(2)) : ""; };
+    const weekYear = e.date ? new Date(e.date + "T12:00").getFullYear() : "";
+    const totalST = days.reduce((a, d) => a + (d.hours1x || 0), 0);
+    const totalOT = days.reduce((a, d) => a + (d.hours15x || 0), 0);
+    const totalDT = days.reduce((a, d) => a + (d.hours2x || 0), 0);
+    const totalMP = days.filter(d => d.mealPenalty).length;
+    const gross = (e.total || 0).toFixed(2);
+    const perD = (e.perDiemTotal || 0).toFixed(2);
+    const mpPay = (e.mealPenaltyPay || 0).toFixed(2);
+    const C = "border:1px solid #000;";
+    const FD = "border:1px solid #000;padding:3px 4px;font-size:9px;vertical-align:middle;";
+    const printStyle = "@page{size:letter landscape;margin:0.4in;}@media print{body{padding:0;}print-color-adjust:exact;-webkit-print-color-adjust:exact;}";
+
+    let html = "";
+
+    // ── CAPS Crew Time Card ───────────────────────────────────────────────────
+    if (format === "caps") {
+      const HDR = `${C}background:#1a1a1a;color:#fff;font-weight:700;font-size:8px;text-align:center;padding:3px 2px;`;
+      const capsRows = days.map(d => {
+        const abbrev = (d.day || "").substring(0, 3).toUpperCase();
+        const m1 = (d.meal1Out && d.meal1In) ? `${d.meal1Out}&ndash;${d.meal1In}` : "";
+        const m2 = (d.meal2Out && d.meal2In) ? `${d.meal2Out}&ndash;${d.meal2In}` : "";
+        const bg = d.type === "hold" ? "background:#fffbeb;" : d.type === "travel" ? "background:#f5f3ff;" : d.type === "off" ? "background:#f9fafb;" : "";
+        return `<tr style="${bg}">
+            <td rowspan="2" style="${FD}text-align:center;font-weight:800;">${abbrev}</td>
+            <td rowspan="2" style="${FD}text-align:center;">${fD(d.date)}</td>
+            <td rowspan="2" style="${FD}"></td>
+            <td rowspan="2" style="${FD}"></td>
+            <td rowspan="2" style="${FD}text-align:right;">$${e.rate || ""}</td>
+            <td rowspan="2" style="${FD}text-align:center;">${fT(d.call)}</td>
+            <td style="${C}padding:2px 4px;font-size:9px;border-bottom:none;">${m1}</td>
+            <td rowspan="2" style="${FD}text-align:center;">${fT(d.wrap)}</td>
+            <td rowspan="2" style="${FD}text-align:center;">${fn(d.hours1x)}</td>
+            <td rowspan="2" style="${FD}text-align:center;">${fn(d.hours15x)}</td>
+            <td rowspan="2" style="${FD}text-align:center;">${fn(d.hours2x)}</td>
+            <td rowspan="2" style="${FD}"></td>
+            <td rowspan="2" style="${FD}text-align:center;">${d.mealPenalty ? "1" : ""}</td>
+            <td rowspan="2" style="${FD}"></td>
+          </tr><tr style="${bg}"><td style="${C}padding:2px 4px;font-size:9px;border-top:none;">${m2}</td></tr>`;
+      }).join("");
+      html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>CAPS Crew Time Card</title><style>
+*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,Helvetica,sans-serif;font-size:9px;color:#000;background:#fff;padding:10px 14px;}
+table{width:100%;border-collapse:collapse;}td,th{border:1px solid #000;padding:3px 4px;vertical-align:top;}
+.nb{border:none!important;}.lbl{font-size:7px;font-weight:700;text-transform:uppercase;letter-spacing:0.2px;color:#444;display:block;margin-bottom:1px;}
+${printStyle}</style></head><body>
+<table style="border:none;margin-bottom:4px;"><tr>
+  <td class="nb" style="width:15%;vertical-align:middle;"><span style="font-size:28px;font-weight:900;font-style:italic;letter-spacing:-1px;">CAPS</span><br/><span style="font-size:7px;color:#666;">A Cast &amp; Crew Entertainment Company</span></td>
+  <td class="nb" style="width:28%;font-size:8px;vertical-align:top;padding-top:2px;">2300 Empire Ave., 5th Floor<br/>Burbank, CA 91504<br/>(310) 280-0755<br/><strong>Check Inquiries: (310) 736-2146</strong></td>
+  <td class="nb" style="width:28%;font-size:8px;vertical-align:top;padding-top:2px;">65 Bleecker Street, 13th Floor<br/>New York, NY 10012<br/>(212) 925-1415<br/><strong>Check Inquiries: (212) 925-1415 X4105</strong></td>
+  <td class="nb" style="width:29%;text-align:right;vertical-align:top;"><span style="font-size:21px;font-weight:900;letter-spacing:0.5px;">CREW TIME CARD</span><br/><span style="font-size:8px;font-weight:700;">Employer: CAPS, LLC, FEIN: 27-4217142</span></td>
+</tr></table>
+<table><tr>
+  <td style="width:38%;"><span class="lbl">Production Co.</span>${e.company || ""}</td>
+  <td style="width:26%;"><span class="lbl">Job Name/Number</span>${e.jobName || ""}</td>
+  <td style="width:10%;"><span class="lbl">Union</span></td>
+  <td style="width:12%;"><span class="lbl">Contract Type</span></td>
+  <td style="width:14%;"><span class="lbl">Occupation</span>${e.jobClassification || ""}</td>
+</tr></table>
+<table><tr>
+  <td style="width:33%;"><span class="lbl">Employee Name</span>${e.workerName || ""}</td>
+  <td style="width:5%;font-size:8px;text-align:center;">M &#9633;<br/>F &#9633;</td>
+  <td style="width:18%;"><span class="lbl">Social Security Number</span>${e.last4SS ? `XXX &ndash; XX &ndash; ${e.last4SS}` : "&mdash;"}</td>
+  <td style="width:16%;"><span class="lbl">Telephone</span></td>
+  <td style="width:28%;"><span class="lbl">Email</span>${e.workerEmail || ""}</td>
+</tr><tr>
+  <td><span class="lbl">Loan Out</span></td>
+  <td colspan="2"><span class="lbl">Federal I.D. Number</span></td>
+  <td colspan="2"><span class="lbl">Rate</span>$${e.rate || ""} PER &nbsp;&#9745; HOUR &nbsp;&#9633; DAY &nbsp;&#9633; OTHER</td>
+</tr></table>
+<table><thead>
+  <tr>
+    <th style="${HDR}width:4%;" rowspan="2">&nbsp;</th>
+    <th style="${HDR}width:8%;" rowspan="2">DATE</th>
+    <th style="${HDR}width:12%;" rowspan="2">LOCATION<br/>ZIP CODE</th>
+    <th style="${HDR}width:6%;" rowspan="2">AICP</th>
+    <th style="${HDR}width:7%;" rowspan="2">RATE</th>
+    <th style="${HDR}width:7%;" rowspan="2">START</th>
+    <th style="${HDR}width:10%;">1st MEAL</th>
+    <th style="${HDR}width:7%;" rowspan="2">END</th>
+    <th style="${HDR}width:6%;" rowspan="2">ST</th>
+    <th style="${HDR}width:6%;" rowspan="2">1.5X</th>
+    <th style="${HDR}width:5%;" rowspan="2">2X</th>
+    <th style="${HDR}width:5%;" rowspan="2">&nbsp;</th>
+    <th style="${HDR}width:5%;" rowspan="2">MP</th>
+    <th style="${HDR}" rowspan="2">COMMENTS</th>
+  </tr>
+  <tr><th style="${HDR}">2nd MEAL</th></tr>
+</thead><tbody>${capsRows}</tbody>
+<tfoot><tr>
+  <td colspan="2"><span class="lbl">YEAR</span>${weekYear}</td>
+  <td colspan="9" style="text-align:right;font-weight:700;font-size:8px;padding-right:8px;">TOTALS</td>
+  <td style="text-align:center;font-weight:700;">${fn(totalST)}</td>
+  <td style="text-align:center;font-weight:700;">${fn(totalOT)}</td>
+  <td style="text-align:center;font-weight:700;">${totalMP || ""}</td>
+  <td style="font-weight:700;"><span class="lbl">GROSS</span>$${gross}</td>
+</tr></tfoot></table>
+<table style="margin-top:0;"><tr>
+  <td style="width:8%;"><span class="lbl">AICP #</span></td>
+  <td style="width:12%;"><span class="lbl">Box Rental</span>$</td>
+  <td style="width:8%;"><span class="lbl">AICP #</span></td>
+  <td style="width:14%;"><span class="lbl">Mileage Non-Taxable</span>$${e.mileage || ""}</td>
+  <td style="width:12%;"><span class="lbl">Mileage Taxable</span>$</td>
+  <td style="width:8%;"><span class="lbl">AICP #</span></td>
+  <td style="width:9%;"><span class="lbl">Advance</span>$</td>
+  <td style="width:8%;"><span class="lbl">AICP #</span></td>
+  <td style="width:21%;"><span class="lbl">Gross w/ Box Rental &amp; Mileage</span>$${gross}</td>
+</tr><tr>
+  <td><span class="lbl">AICP #</span></td>
+  <td><span class="lbl">Car Allowance</span>$</td>
+  <td><span class="lbl">AICP #</span></td>
+  <td><span class="lbl">Per Diem Non-Taxable</span>$${perD}</td>
+  <td><span class="lbl">Per Diem Taxable</span>$</td>
+  <td><span class="lbl">AICP #</span></td>
+  <td><span class="lbl">Other</span>$</td>
+  <td><span class="lbl">AICP #</span></td>
+  <td></td>
+</tr></table>
+<div style="display:flex;gap:20px;margin-top:8px;"><div style="flex:1;">EMPLOYEE SIGNATURE <span style="display:inline-block;width:62%;border-bottom:1px solid #000;">&nbsp;</span></div><div style="flex:1;">APPROVED <span style="display:inline-block;width:72%;border-bottom:1px solid #000;">&nbsp;</span></div></div>
+<p style="font-size:7px;color:#444;line-height:1.5;margin-top:6px;">Attention all CA employees: Effective 2/14/2014, CAPS, A Cast &amp; Crew Company has established a Medical Provider Network (MPN) for all work-related injuries and/or illnesses. In the event of an injury, your care will be directed to a physician within the MPN and you have the right to pre-designate a doctor. For further information, please email MPN@capspayroll.com.</p>
+</body></html>`;
+
+    // ── EP Non-Union Crew Time Card ───────────────────────────────────────────
+    } else if (format === "ep") {
+      const EPHDR = `${C}background:#000;color:#fff;font-weight:700;font-size:7.5px;text-align:center;padding:2px 1px;`;
+      const ords = ["1ST", "2ND", "3RD", "4TH", "5TH", "6TH", "7TH"];
+      const epRows = days.map((d, i) => {
+        const bg = d.type === "hold" ? "background:#fffbeb;" : d.type === "travel" ? "background:#f5f3ff;" : d.type === "off" ? "background:#f9fafb;" : "";
+        const wages = (((d.hours1x || 0) + (d.hours15x || 0) * 1.5 + (d.hours2x || 0) * 2) * (e.rate || 0)).toFixed(2);
+        return `<tr style="${bg}">
+          <td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td>
+          <td style="${FD}text-align:center;">${fD(d.date)}</td>
+          <td style="${FD}"></td>
+          <td style="${FD}text-align:center;font-weight:700;font-size:8px;">${ords[i] || ""}<br/><span style="font-weight:400;font-size:7px;">${(d.day || "").substring(0, 3)}</span></td>
+          <td style="${FD}text-align:center;">${fT(d.call)}</td>
+          <td style="${FD}text-align:center;">${fT(d.meal1Out)}</td>
+          <td style="${FD}text-align:center;">${fT(d.meal1In)}</td>
+          <td style="${FD}text-align:center;">${fT(d.meal2Out)}</td>
+          <td style="${FD}text-align:center;">${fT(d.meal2In)}</td>
+          <td style="${FD}text-align:center;">${fT(d.wrap)}</td>
+          <td style="${FD}"></td>
+          <td style="${FD}"></td>
+          <td style="${FD}text-align:center;">${fn(d.totalHours)}</td>
+          <td style="${FD}text-align:center;">${fn(d.hours1x)}</td>
+          <td style="${FD}text-align:center;">${fn(d.hours15x)}</td>
+          <td style="${FD}text-align:center;">${fn(d.hours2x)}</td>
+          <td style="${FD}text-align:center;">${d.mealPenalty ? "1" : ""}</td>
+          <td style="${FD}"></td>
+          <td style="${FD}text-align:right;">$${e.rate || ""}</td>
+          <td style="${FD}"></td>
+          <td style="${FD}text-align:center;">${fn(d.totalHours)}</td>
+          <td style="${FD}text-align:right;font-weight:700;">$${wages}</td>
+        </tr>`;
+      }).join("");
+      html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>EP Non-Union Crew Time Card</title><style>
+*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,Helvetica,sans-serif;font-size:9px;color:#000;background:#fff;padding:10px 14px;}
+table{width:100%;border-collapse:collapse;}td,th{border:1px solid #000;padding:2px 3px;vertical-align:middle;}
+.nb{border:none!important;}.lbl{font-size:7px;font-weight:700;text-transform:uppercase;color:#444;display:block;margin-bottom:1px;}
+${printStyle}</style></head><body>
+<table style="border:none;margin-bottom:6px;"><tr>
+  <td class="nb" style="width:55%;vertical-align:middle;"><span style="display:inline-flex;align-items:center;gap:8px;"><span style="font-size:18px;font-weight:900;background:#e31e24;color:#fff;padding:3px 8px;border-radius:3px;">ep</span><span style="font-size:17px;font-weight:900;letter-spacing:0.5px;">NON-UNION CREW TIME CARD</span></span></td>
+  <td class="nb" style="text-align:right;font-size:8px;vertical-align:middle;">EP-1002 Electronic (2016)</td>
+</tr></table>
+<table><tr>
+  <td style="width:30%;"><span class="lbl">Picture</span>${e.company || ""}</td>
+  <td style="width:20%;"><span class="lbl">Prod #</span>${e.jobName || e.jobId || ""}</td>
+  <td style="width:13%;"><span class="lbl">Guar. Hours</span>${e.guarHours || ""}</td>
+  <td style="width:13%;"><span class="lbl">Rate</span>$${e.rate || ""}/hr</td>
+  <td style="width:24%;"><span class="lbl">Week Ending</span>${e.date || ""}</td>
+</tr><tr>
+  <td><span class="lbl">Name</span>${e.workerName || ""}</td>
+  <td><span class="lbl">Social Security #</span>XXX-XX-${e.last4SS || "____"}</td>
+  <td colspan="2"><span class="lbl">Job Classification / Occ. Code</span>${e.jobClassification || ""}</td>
+  <td><span class="lbl">Account #</span></td>
+</tr><tr>
+  <td><span class="lbl">Loan-Out</span></td>
+  <td><span class="lbl">Federal I.D. #</span></td>
+  <td colspan="3"><span class="lbl">Location</span></td>
+</tr></table>
+<table><thead>
+  <tr>
+    <th colspan="6" style="${EPHDR}">WORK</th>
+    <th style="${EPHDR}" rowspan="2">CALL</th>
+    <th colspan="2" style="${EPHDR}">MEAL 1</th>
+    <th colspan="2" style="${EPHDR}">MEAL 2</th>
+    <th style="${EPHDR}" rowspan="2">WRAP</th>
+    <th style="${EPHDR}" rowspan="2">RE-RATE</th>
+    <th style="${EPHDR}" rowspan="2">OCC. CODE</th>
+    <th style="${EPHDR}" rowspan="2">TOTAL HRS.</th>
+    <th style="${EPHDR}" rowspan="2">1X</th>
+    <th style="${EPHDR}" rowspan="2">1.5X</th>
+    <th style="${EPHDR}" rowspan="2">2X</th>
+    <th style="${EPHDR}" rowspan="2">MEAL PNLTY</th>
+    <th style="${EPHDR}" rowspan="2">ACCT</th>
+    <th style="${EPHDR}" rowspan="2">RATE</th>
+    <th style="${EPHDR}" rowspan="2">TYPE</th>
+    <th style="${EPHDR}" rowspan="2">HRS</th>
+    <th style="${EPHDR}" rowspan="2">TOTAL</th>
+  </tr>
+  <tr>
+    <th style="${EPHDR}">STATE</th>
+    <th style="${EPHDR}">CITY</th>
+    <th style="${EPHDR}">ACCT. CODE</th>
+    <th style="${EPHDR}">DATE</th>
+    <th style="${EPHDR}">LOC</th>
+    <th style="${EPHDR}">DAY</th>
+    <th style="${EPHDR}">OUT</th>
+    <th style="${EPHDR}">IN</th>
+    <th style="${EPHDR}">OUT</th>
+    <th style="${EPHDR}">IN</th>
+  </tr>
+</thead><tbody>${epRows}</tbody>
+<tfoot>
+  <tr>
+    <td colspan="4" style="font-size:8px;"><span class="lbl">Layoff/Termination Date</span>&nbsp;&nbsp;/&nbsp;&nbsp;&nbsp;/</td>
+    <td colspan="9" style="text-align:right;font-weight:700;font-size:8px;padding-right:6px;">TOTAL HOURS</td>
+    <td style="text-align:center;font-weight:700;">${fn(e.hours || 0)}</td>
+    <td style="text-align:center;font-weight:700;">${fn(totalST)}</td>
+    <td style="text-align:center;font-weight:700;">${fn(totalOT)}</td>
+    <td style="text-align:center;font-weight:700;">${fn(totalDT)}</td>
+    <td style="text-align:center;font-weight:700;">${totalMP || ""}</td>
+    <td colspan="4"></td>
+    <td style="text-align:right;font-weight:700;background:#f0f0f0;">$${gross}</td>
+  </tr>
+  <tr>
+    <td colspan="22" style="height:20px;vertical-align:top;font-weight:700;font-size:8px;">COMMENTS:</td>
+    <td style="font-size:8px;font-weight:700;text-align:right;">TOTAL<br/>AMOUNT<br/>$${gross}</td>
+  </tr>
+</tfoot></table>
+<p style="font-size:7.5px;color:#444;margin-top:8px;">IN SIGNING BELOW, THE EMPLOYEE/LOAN-OUT AND SUPERVISOR/PRODUCTION APPROVER EACH CERTIFY THAT THE INFORMATION PROVIDED IS CORRECT AND COMPLETE.</p>
+<div style="display:flex;gap:20px;margin-top:6px;"><div style="flex:1.5;">EMPLOYEE/LOAN-OUT SIGNATURE &nbsp;X <span style="display:inline-block;width:55%;border-bottom:1px solid #000;">&nbsp;</span></div><div style="flex:1;">APPROVED &nbsp;X <span style="display:inline-block;width:60%;border-bottom:1px solid #000;">&nbsp;</span></div></div>
+</body></html>`;
+
+    // ── GreenSlate Crew Time Card ─────────────────────────────────────────────
+    } else if (format === "greenslate") {
+      const GSHDR = `${C}background:#e0e0e0;font-weight:700;font-size:7.5px;text-align:center;padding:2px 2px;`;
+      const st1 = days.reduce((a, d) => a + (d.hours1x || 0), 0);
+      const st15 = days.reduce((a, d) => a + (d.hours15x || 0), 0);
+      const st2 = days.reduce((a, d) => a + (d.hours2x || 0), 0);
+      const w1 = (st1 * (e.rate || 0)).toFixed(2);
+      const w15 = (st15 * 1.5 * (e.rate || 0)).toFixed(2);
+      const w2 = (st2 * 2 * (e.rate || 0)).toFixed(2);
+      const gsRows = days.map(d => {
+        const abbrev = (d.day || "").substring(0, 3);
+        const bg = d.type === "hold" ? "background:#fffbeb;" : d.type === "travel" ? "background:#f5f3ff;" : d.type === "off" ? "background:#f9fafb;" : "";
+        return `<tr style="${bg}">
+          <td style="${FD}text-align:center;font-weight:700;">${abbrev}</td>
+          <td style="${FD}text-align:center;">${fD(d.date)}</td>
+          <td style="${FD}text-align:center;">${fT(d.call)}</td>
+          <td style="${FD}text-align:center;">${fT(d.meal1Out)}</td>
+          <td style="${FD}text-align:center;">${fT(d.meal1In)}</td>
+          <td style="${FD}text-align:center;">${fT(d.meal2Out)}</td>
+          <td style="${FD}text-align:center;">${fT(d.meal2In)}</td>
+          <td style="${FD}text-align:center;">${fT(d.wrap)}</td>
+          <td style="${FD}text-align:center;">${fn(d.totalHours)}</td>
+          <td style="${FD}font-size:8px;text-align:center;">L ${d.mealPenalty ? "&#9745;" : "&#9633;"}<br/>D &#9633;</td>
+          <td style="${FD}text-align:center;">${d.mealPenalty ? "$" + (e.rate || 0).toFixed(2) : ""}</td>
+          <td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td>
+          <td style="${FD}text-align:center;">${fn(d.hours1x)}</td>
+          <td style="${FD}text-align:center;">${fn(d.hours15x)}</td>
+          <td style="${FD}text-align:center;">${fn(d.hours2x)}</td>
+          <td style="${FD}"></td><td style="${FD}"></td>
+        </tr>`;
+      }).join("");
+      html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>GreenSlate Crew Time Card</title><style>
+*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,Helvetica,sans-serif;font-size:9px;color:#000;background:#fff;padding:10px 14px;}
+table{width:100%;border-collapse:collapse;}td,th{border:1px solid #000;padding:2px 3px;vertical-align:top;}
+.nb{border:none!important;}.lbl{font-size:7px;font-weight:700;text-transform:uppercase;color:#444;display:block;margin-bottom:1px;}
+${printStyle}</style></head><body>
+<table style="border:none;margin-bottom:5px;"><tr>
+  <td class="nb" style="width:30%;vertical-align:middle;"><span style="color:#2e7d32;font-weight:900;font-size:18px;letter-spacing:0.5px;">&#9671; GREENSLATE</span></td>
+  <td class="nb" style="width:40%;text-align:center;vertical-align:middle;"><span style="font-size:15px;font-weight:900;letter-spacing:1px;">CREW TIME CARD</span></td>
+  <td class="nb" style="width:30%;text-align:right;font-size:8px;vertical-align:top;">150 West 30th Street&ndash;Suite 405<br/>New York, NY 10001<br/>(212) 206-1724 Tel &nbsp;&bull;&nbsp; (212) 206-1070 Fax</td>
+</tr></table>
+<table><tr>
+  <td style="width:35%;"><span class="lbl">Employee Name</span>${e.workerName || ""}</td>
+  <td style="width:25%;"><span class="lbl">SS# XXX-XX-${e.last4SS || "____"}</span><span style="font-size:7px;color:#666;">(last 4 digits only)</span></td>
+  <td style="width:40%;"><span class="lbl">Production</span>${e.company || ""}</td>
+</tr><tr>
+  <td><span class="lbl">Loan Out Corp</span></td>
+  <td><span class="lbl">Fed ID#</span></td>
+  <td><span class="lbl">Company</span>${e.company || ""}</td>
+</tr><tr>
+  <td style="width:14%;"><span class="lbl">Work State</span></td>
+  <td style="width:14%;"><span class="lbl">Union</span></td>
+  <td style="width:24%;"><span class="lbl">Pay Rate</span>$${e.rate || ""}/hr</td>
+  <td style="width:22%;"><span class="lbl">Position</span>${e.jobClassification || ""}</td>
+  <td style="width:26%;"><span class="lbl">Week Ending</span>${e.date || ""}</td>
+</tr></table>
+<table style="margin-top:2px;"><thead>
+  <tr>
+    <th style="${GSHDR}width:4%;" rowspan="2">DAY</th>
+    <th style="${GSHDR}width:7%;" rowspan="2">DATE</th>
+    <th style="${GSHDR}width:5%;" rowspan="2">IN</th>
+    <th colspan="2" style="${GSHDR}">MEAL #1</th>
+    <th colspan="2" style="${GSHDR}">MEAL #2</th>
+    <th style="${GSHDR}width:5%;" rowspan="2">OUT</th>
+    <th style="${GSHDR}width:6%;" rowspan="2">TOTAL HOURS</th>
+    <th style="${GSHDR}width:8%;" rowspan="2">MEAL PENALTIES</th>
+    <th style="${GSHDR}width:6%;" rowspan="2">MP AMOUNT</th>
+    <th style="${GSHDR}width:7%;" rowspan="2">ACCOUNT CODE</th>
+    <th style="${GSHDR}width:5%;" rowspan="2">SET CODE</th>
+    <th style="${GSHDR}width:6%;" rowspan="2">TAX CREDIT CODE</th>
+    <th colspan="5" style="${GSHDR}">HOURS</th>
+  </tr>
+  <tr>
+    <th style="${GSHDR}width:5%;">OUT</th><th style="${GSHDR}width:5%;">IN</th>
+    <th style="${GSHDR}width:5%;">OUT</th><th style="${GSHDR}width:5%;">IN</th>
+    <th style="${GSHDR}width:5%;">1X</th><th style="${GSHDR}width:5%;">1.5X</th>
+    <th style="${GSHDR}width:5%;">2X</th><th style="${GSHDR}width:5%;">2.5X</th><th style="${GSHDR}width:5%;">3X</th>
+  </tr>
+</thead><tbody>${gsRows}</tbody>
+<tfoot><tr>
+  <td colspan="8" style="text-align:right;font-weight:700;font-size:8px;padding-right:6px;">TOTAL:</td>
+  <td style="text-align:center;font-weight:700;">${fn(e.hours || 0)}</td>
+  <td colspan="5"></td>
+  <td style="text-align:center;font-weight:700;">${fn(totalST)}</td>
+  <td style="text-align:center;font-weight:700;">${fn(totalOT)}</td>
+  <td style="text-align:center;font-weight:700;">${fn(totalDT)}</td>
+  <td></td><td></td>
+</tr></tfoot></table>
+<table style="margin-top:4px;"><tr>
+  <td style="width:26%;vertical-align:top;">
+    <strong style="font-size:8px;">GROSS HOURS</strong>
+    <table style="width:100%;margin-top:3px;"><thead>
+      <tr><th style="${GSHDR}">Rate</th><th style="${GSHDR}">Hours</th><th style="${GSHDR}">Rate</th><th style="${GSHDR}">Total</th></tr>
+    </thead><tbody>
+      <tr><td style="${FD}">1X</td><td style="${FD}text-align:center;">${fn(st1)}</td><td style="${FD}text-align:right;">$${e.rate || ""}</td><td style="${FD}text-align:right;">$${w1}</td></tr>
+      <tr><td style="${FD}">1.5X</td><td style="${FD}text-align:center;">${fn(st15)}</td><td style="${FD}text-align:right;">$${((e.rate || 0) * 1.5).toFixed(2)}</td><td style="${FD}text-align:right;">$${w15}</td></tr>
+      <tr><td style="${FD}">2X</td><td style="${FD}text-align:center;">${fn(st2)}</td><td style="${FD}text-align:right;">$${((e.rate || 0) * 2).toFixed(2)}</td><td style="${FD}text-align:right;">$${w2}</td></tr>
+      <tr><td style="${FD}">2.5X</td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td></tr>
+      <tr><td style="${FD}">3X</td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td></tr>
+      <tr><td style="${FD}">MP</td><td colspan="2" style="${FD}font-size:8px;">L&nbsp;/&nbsp;D</td><td style="${FD}text-align:right;">$${mpPay}</td></tr>
+      <tr><td colspan="3" style="${FD}text-align:right;font-weight:700;">SUB-TOTAL:</td><td style="${FD}text-align:right;font-weight:700;">$${gross}</td></tr>
+    </tbody></table>
+  </td>
+  <td style="width:38%;vertical-align:top;">
+    <strong style="font-size:8px;">OTHER EARNINGS</strong>
+    <table style="width:100%;margin-top:3px;"><thead>
+      <tr><th style="${GSHDR}">Item</th><th style="${GSHDR}">Acct Code</th><th style="${GSHDR}">Days</th><th style="${GSHDR}">Rate</th><th style="${GSHDR}">Total</th></tr>
+    </thead><tbody>
+      <tr><td style="${FD}font-size:8px;">Box Rental</td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td></tr>
+      <tr><td style="${FD}font-size:8px;">Camera Bump</td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td></tr>
+      <tr><td style="${FD}font-size:8px;">Car Rental</td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td></tr>
+      <tr><td style="${FD}font-size:8px;">Mileage</td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}text-align:right;">$${e.mileage || ""}</td></tr>
+      <tr><td style="${FD}font-size:8px;">Meal Allow/Money</td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td></tr>
+      <tr><td style="${FD}font-size:8px;">Production Fee</td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td></tr>
+      <tr><td style="${FD}font-size:8px;">Vacation</td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td></tr>
+      <tr><td colspan="4" style="${FD}text-align:right;font-weight:700;font-size:8px;">OTHER EARNINGS TOTAL:</td><td style="${FD}text-align:right;font-weight:700;">$</td></tr>
+    </tbody></table>
+  </td>
+  <td style="width:36%;vertical-align:top;">
+    <strong style="font-size:8px;">HOUSING / PER DIEM</strong>
+    <table style="width:100%;margin-top:3px;"><thead>
+      <tr><th style="${GSHDR}">Item</th><th style="${GSHDR}">Acct Code</th><th style="${GSHDR}">Days</th><th style="${GSHDR}">Rate</th><th style="${GSHDR}">Total</th></tr>
+    </thead><tbody>
+      <tr><td style="${FD}font-size:8px;">Per Diem (Allow)</td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}text-align:right;">$${e.workPerDiem || ""}</td><td style="${FD}text-align:right;">$${perD}</td></tr>
+      <tr><td style="${FD}font-size:8px;">Per Diem (Taxable)</td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td></tr>
+      <tr><td style="${FD}font-size:8px;">Housing (Allow)</td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td></tr>
+      <tr><td style="${FD}font-size:8px;">Housing (Taxable)</td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td><td style="${FD}"></td></tr>
+      <tr><td colspan="4" style="${FD}text-align:right;font-weight:700;font-size:8px;">HOUSING / PER DIEM TOTAL:</td><td style="${FD}text-align:right;font-weight:700;">$${perD}</td></tr>
+    </tbody></table>
+    <div style="margin-top:6px;border:2px solid #000;padding:6px;text-align:center;">
+      <div style="font-size:8px;font-weight:900;letter-spacing:0.3px;">TOTAL GROSS AMOUNT<br/>OF ALL EARNINGS:</div>
+      <div style="font-size:16px;font-weight:900;margin-top:4px;">$${gross}</div>
+    </div>
+  </td>
+</tr></table>
+<div style="display:flex;gap:20px;margin-top:8px;border-top:1px solid #000;padding-top:6px;">
+  <div style="flex:1;font-size:8px;font-weight:700;">Employee Signature &amp; Date <span style="display:inline-block;width:48%;border-bottom:1px solid #000;">&nbsp;</span></div>
+  <div style="flex:1;font-size:8px;font-weight:700;">Department Head Signature &amp; Date <span style="display:inline-block;width:40%;border-bottom:1px solid #000;">&nbsp;</span></div>
+  <div style="flex:1;font-size:8px;font-weight:700;">Authorized Signature &amp; Date <span style="display:inline-block;width:45%;border-bottom:1px solid #000;">&nbsp;</span></div>
+</div>
+</body></html>`;
+    }
+
+    if (!html) return;
+    const w = window.open("", "_blank");
+    if (!w) { alert("Please allow pop-ups for this site to generate the timecard."); return; }
+    w.document.write(html);
+    w.document.close();
+    setTimeout(() => w.print(), 400);
+  };
+
   // ── INVOICE GENERATOR ───────────────────────────────────────────────────────
   const openInvoiceGenerator = () => {
     const today = new Date().toISOString().split("T")[0];
@@ -1216,7 +1665,10 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
       clientZip: "",
       invoiceNumber: num,
       invoiceDate: today,
+      paymentTerms: "Net 30",
       dueDate: dueD.toISOString().split("T")[0],
+      lateFeeType: "none",
+      lateFeeRate: "",
       jobName: "",
       jobId: "",
       lineItems: [{ id: crypto.randomUUID(), description: "", qty: "1", rate: "", amount: 0 }],
@@ -1336,6 +1788,7 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
   <div class="cj-col">
     <div class="lbl">Date Submitted</div><div class="val">${fmtDate(form.invoiceDate)}</div>
     <div class="lbl" style="margin-top:5px;">Due Date</div><div class="val" style="font-weight:600;">${fmtDate(form.dueDate)}</div>
+    ${form.paymentTerms && form.paymentTerms !== "Custom" ? `<div class="lbl" style="margin-top:5px;">Payment Terms</div><div class="val">${form.paymentTerms}</div>` : ""}
     ${form.jobName ? `<div class="lbl" style="margin-top:5px;">Job / Show</div><div class="val">${form.jobName}</div>` : ""}
   </div>
 </div>
@@ -1355,6 +1808,7 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
   <div>
     <div class="tr-row"><span>Subtotal</span><span>$${fmt(subtotal)}</span></div>
     ${taxAmt > 0 ? `<div class="tr-row"><span>Tax (${form.taxRate}%)</span><span>$${fmt(taxAmt)}</span></div>` : ""}
+    ${(form.lateFeeType && form.lateFeeType !== "none" && parseFloat(form.lateFeeRate) > 0) ? `<div class="tr-row" style="color:#b45309;"><span>${form.lateFeeType === "flat" ? `Late Fee (flat $${fmt(form.lateFeeRate)})` : `Late Fee (${form.lateFeeRate}%/day)`}</span><span style="font-style:italic;">applied if overdue</span></div>` : ""}
     <div class="tr-row grand"><span>TOTAL</span><span>$${fmt(total)}</span></div>
   </div>
 </div>
@@ -1396,6 +1850,10 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
         company: form.clientName || "", amount: total, date: form.invoiceDate,
         invoiceNumber: form.invoiceNumber || "", status: "Unpaid",
         jobId: form.jobId || "", dueDate: form.dueDate,
+        paymentTerms: form.paymentTerms || "Net 30",
+        lateFeeType: form.lateFeeType || "none",
+        lateFeeRate: parseFloat(form.lateFeeRate) || 0,
+        amountReceived: 0,
         generated: true, generatedData: form, timestamp: Date.now(),
       }, ...prev]);
       if (form.jobId) setExpandedJobs(prev => { const n = new Set(prev); n.add(form.jobId); return n; });
@@ -1562,7 +2020,12 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
     (!sq || (t.company||'').toLowerCase().includes(sq) || (t.description||'').toLowerCase().includes(sq) || String(t.hours||'').includes(sq)));
 
   const totalBilled = filteredInvoices.reduce((a, b) => a + (parseFloat(b.amount) || 0), 0);
-  const totalPaid = filteredInvoices.filter(i => i.status === "Paid").reduce((a, b) => a + (parseFloat(b.amount) || 0), 0);
+  const totalPaid = filteredInvoices.reduce((a, b) => {
+    const status = computeInvoiceStatus(b);
+    if (status === "Paid") return a + (parseFloat(b.amount) || 0);
+    if (status === "Partially Paid") return a + (parseFloat(b.amountReceived) || 0);
+    return a;
+  }, 0);
   const totalOutstanding = totalBilled - totalPaid;
   const totalTimecardHours = filteredTimecards.reduce((a, b) => a + (b.hours || 0), 0);
   const totalTimecardEarnings = filteredTimecards.reduce((a, b) => a + (b.total || 0), 0);
@@ -1903,6 +2366,64 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
         </div>
       )}
 
+      {/* ── Payroll Portal Export Modal ── */}
+      {showExportModal && exportEntry && (() => {
+        const formats = [
+          {
+            id: "ep",
+            name: "Entertainment Partners (EP)",
+            desc: "Generates the standard EP Non-Union Crew Time Card — the exact form used by EP, Cast & Crew, and Media Services payroll portals.",
+            badge: "EP · C&C",
+            color: "border-blue-300 bg-blue-50",
+            badgeColor: "bg-blue-600 text-white",
+          },
+          {
+            id: "greenslate",
+            name: "GreenSlate Crew Time Card",
+            desc: "Generates the GreenSlate Crew Time Card form, including the Gross Hours summary, Other Earnings, Housing/Per Diem, and Deductions sections.",
+            badge: "GreenSlate",
+            color: "border-emerald-300 bg-emerald-50",
+            badgeColor: "bg-emerald-600 text-white",
+          },
+          {
+            id: "caps",
+            name: "CAPS Crew Time Card",
+            desc: "Generates the official CAPS (A Cast & Crew Company) Crew Time Card, with all AICP fields, dual-meal rows, and the CA MPN notice.",
+            badge: "CAPS",
+            color: "border-violet-300 bg-violet-50",
+            badgeColor: "bg-violet-600 text-white",
+          },
+        ];
+        return (
+          <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" onClick={() => setShowExportModal(false)}>
+            <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+                <div>
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2"><FileDown size={16} className="text-violet-600" />Generate Payroll Timecard</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">{exportEntry.company} — Week ending {exportEntry.date}</p>
+                </div>
+                <Button variant="ghost" onClick={() => setShowExportModal(false)} className="!px-2"><X size={18} /></Button>
+              </div>
+              <div className="p-6 space-y-3">
+                <p className="text-sm text-slate-600">Choose a portal format. Your timecard data will be filled into the official form layout — ready to print or save as PDF.</p>
+                {formats.map(f => (
+                  <button key={f.id}
+                    onClick={() => { generatePayrollTimecard(exportEntry, f.id); setShowExportModal(false); }}
+                    className={`w-full text-left rounded-xl border-2 p-4 transition-all hover:shadow-md active:scale-[0.99] ${f.color}`}>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${f.badgeColor}`}>{f.badge}</span>
+                      <span className="text-sm font-bold text-slate-800">{f.name}</span>
+                    </div>
+                    <p className="text-xs text-slate-500 leading-relaxed">{f.desc}</p>
+                  </button>
+                ))}
+                <p className="text-[10px] text-slate-400 pt-1">A print preview will open in a new tab. Use <strong>File → Print</strong> (or ⌘P) and choose <strong>Save as PDF</strong> to download.</p>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Edit Timecard Modal ── */}
       {editingTimecard && (
         <div className="fixed inset-0 bg-black/70 z-50 flex items-start justify-center p-4 overflow-y-auto" onClick={() => setEditingTimecard(null)}>
@@ -2109,6 +2630,24 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                         })}
                       </tr>
                     ))}
+                    <tr className="bg-sky-50 border-t border-sky-200">
+                      <td className="px-3 py-1.5 text-[10px] font-bold text-sky-700 uppercase border-r border-slate-200 whitespace-nowrap">Day Type</td>
+                      {editingTimecard.days.map((d, i) => {
+                        const isWeekend = i === 0 || i === 6;
+                        return (
+                          <td key={i} className={`px-1 py-1.5 border-r border-slate-100 last:border-r-0 text-center ${isWeekend ? "bg-amber-50/60" : ""}`}>
+                            <select value={d.type || "work"}
+                              onChange={e => setEditingTimecard(p => ({ ...p, days: p.days.map((day, idx) => idx !== i ? day : { ...day, type: e.target.value }) }))}
+                              className="w-full text-[10px] border border-sky-200 rounded px-0.5 py-0.5 bg-white focus:outline-none focus:border-blue-400 text-slate-700">
+                              <option value="work">Work</option>
+                              <option value="hold">Hold</option>
+                              <option value="travel">Travel</option>
+                              <option value="off">Off</option>
+                            </select>
+                          </td>
+                        );
+                      })}
+                    </tr>
                     <tr className="bg-orange-50 border-t border-orange-200">
                       <td className="px-3 py-1.5 text-[10px] font-bold text-orange-700 uppercase border-r border-slate-200 whitespace-nowrap">Meal Penalty</td>
                       {editingTimecard.days.map((d, i) => {
@@ -2391,12 +2930,49 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                   </div>
                   <div className="space-y-1">
                     <label className="text-[10px] font-bold text-slate-400 uppercase">Date</label>
-                    <Input type="date" value={invoiceForm.invoiceDate} onChange={e => setInvoiceForm(p => ({ ...p, invoiceDate: e.target.value }))} />
+                    <Input type="date" value={invoiceForm.invoiceDate} onChange={e => {
+                      const newDate = e.target.value;
+                      const newDue = dueDateFromTerms(newDate, invoiceForm.paymentTerms);
+                      setInvoiceForm(p => ({ ...p, invoiceDate: newDate, ...(newDue ? { dueDate: newDue } : {}) }));
+                    }} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Payment Terms</label>
+                    <select
+                      value={invoiceForm.paymentTerms || "Net 30"}
+                      onChange={e => {
+                        const terms = e.target.value;
+                        const newDue = dueDateFromTerms(invoiceForm.invoiceDate, terms);
+                        setInvoiceForm(p => ({ ...p, paymentTerms: terms, ...(newDue ? { dueDate: newDue } : {}) }));
+                      }}
+                      className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                      {PAYMENT_TERMS.map(t => <option key={t.label} value={t.label}>{t.label}</option>)}
+                    </select>
                   </div>
                   <div className="space-y-1">
                     <label className="text-[10px] font-bold text-slate-400 uppercase">Due Date</label>
-                    <Input type="date" value={invoiceForm.dueDate} onChange={e => setInvoiceForm(p => ({ ...p, dueDate: e.target.value }))} />
+                    <Input type="date" value={invoiceForm.dueDate} onChange={e => setInvoiceForm(p => ({ ...p, dueDate: e.target.value, paymentTerms: "Custom" }))} />
                   </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Late Fee Type</label>
+                    <select
+                      value={invoiceForm.lateFeeType || "none"}
+                      onChange={e => setInvoiceForm(p => ({ ...p, lateFeeType: e.target.value }))}
+                      className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                      <option value="none">None</option>
+                      <option value="flat">Flat fee ($)</option>
+                      <option value="daily">Daily interest (%/day)</option>
+                    </select>
+                  </div>
+                  {invoiceForm.lateFeeType && invoiceForm.lateFeeType !== "none" && (
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase">
+                        {invoiceForm.lateFeeType === "flat" ? "Flat Fee Amount ($)" : "Daily Rate (%)"}
+                      </label>
+                      <Input type="number" value={invoiceForm.lateFeeRate} onChange={e => setInvoiceForm(p => ({ ...p, lateFeeRate: e.target.value }))}
+                        placeholder={invoiceForm.lateFeeType === "flat" ? "e.g. 50" : "e.g. 0.1"} />
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -2801,7 +3377,7 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
         )}
 
         {/* Year selector — hidden on Kit tab */}
-        <div className={`flex items-center gap-2 flex-wrap ${activeTab === "kit" ? "hidden" : ""}`}>
+        <div className={`flex items-center gap-2 flex-wrap ${activeTab === "kit" || activeTab === "calendar" ? "hidden" : ""}`}>
           <span className="text-xs font-bold text-slate-400 uppercase tracking-wider mr-1">Year</span>
           {allYears.map(yr => (
             <button key={yr} onClick={() => setSelectedYear(yr)}
@@ -2832,6 +3408,9 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
             </button>
             <button onClick={() => { setActiveTab("mileage"); setSearchQuery(""); }} className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "mileage" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
               <MapPin size={14} className="inline mr-1.5 -mt-0.5" />Mileage
+            </button>
+            <button onClick={() => { setActiveTab("calendar"); setSearchQuery(""); }} className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "calendar" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
+              <Calendar size={14} className="inline mr-1.5 -mt-0.5" />Calendar
             </button>
           </div>
           <div className="relative flex-1 min-w-[200px] max-w-xs">
@@ -2901,7 +3480,7 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
             {/* Overdue / due-soon notification banners */}
             {(() => {
               const today = new Date(); today.setHours(0,0,0,0);
-              const unpaid = invoices.filter(i => i.status !== "Paid");
+              const unpaid = invoices.filter(i => { const s = computeInvoiceStatus(i); return s !== "Paid"; });
               const getDue = i => { const d = new Date(i.dueDate || (() => { const x = new Date(i.date); x.setDate(x.getDate() + 30); return x.toISOString().split("T")[0]; })()); d.setHours(0,0,0,0); return d; };
               const overdue = unpaid.filter(i => getDue(i) < today);
               const dueSoon = unpaid.filter(i => { const diff = Math.round((getDue(i) - today) / 86400000); return diff >= 0 && diff <= 7; });
@@ -2986,7 +3565,12 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                   if (group.items.length === 0) return null;
                   const isExpanded = sq || group.id === "" ? true : expandedJobs.has(group.id);
                   const groupBilled = group.items.reduce((a, b) => a + (parseFloat(b.amount) || 0), 0);
-                  const groupPaid = group.items.filter(i => i.status === "Paid").reduce((a, b) => a + (parseFloat(b.amount) || 0), 0);
+                  const groupPaid = group.items.reduce((a, b) => {
+                    const s = computeInvoiceStatus(b);
+                    if (s === "Paid") return a + (parseFloat(b.amount) || 0);
+                    if (s === "Partially Paid") return a + (parseFloat(b.amountReceived) || 0);
+                    return a;
+                  }, 0);
                   return (
                     <div key={group.id || "unassigned"} className="border border-slate-200 rounded-xl overflow-hidden bg-white">
                       <div className="flex items-center justify-between px-4 py-3 bg-slate-50 border-b border-slate-200 cursor-pointer select-none"
@@ -3013,10 +3597,19 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                               {group.items.map((item) => {
                                 const idx = invoices.findIndex(i => i.id === item.id);
+                                const effectiveStatus = computeInvoiceStatus(item);
+                                const lateFee = calcLateFee(item);
+                                const amountReceived = parseFloat(item.amountReceived) || 0;
+                                const amountOwed = Math.max(0, (parseFloat(item.amount) || 0) - amountReceived);
+                                const statusBadgeClass = effectiveStatus === "Paid"
+                                  ? "bg-emerald-100 text-emerald-700"
+                                  : effectiveStatus === "Partially Paid"
+                                  ? "bg-orange-100 text-orange-700"
+                                  : "bg-amber-100 text-amber-700";
                                 return (<Card key={item.id} id={item.id} className={`transition-all flex flex-col ${item.locked ? "border-amber-200 bg-amber-50/20" : "hover:border-blue-200"} ${highlightedId === item.id ? "ring-2 ring-blue-500 border-blue-400" : ""}`}>
                                   <div className="p-5 flex-1 space-y-4">
                                     <div className="flex justify-between items-start">
-                                      <div className={`px-2.5 py-1 rounded-md text-xs font-bold uppercase tracking-wider ${item.status === "Paid" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{item.status}</div>
+                                      <div className={`px-2.5 py-1 rounded-md text-xs font-bold uppercase tracking-wider ${statusBadgeClass}`}>{effectiveStatus}</div>
                                       <div className="flex items-center gap-1">
                                         <button
                                           onClick={() => { const n = [...invoices]; n[idx] = { ...n[idx], locked: !n[idx].locked }; setInvoices(n); }}
@@ -3034,13 +3627,12 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                                       </div>
                                     </div>
                                     {item.invoiceNumber && <p className="text-[11px] text-slate-400 font-mono tracking-wide -mt-2">#{item.invoiceNumber}</p>}
-                                    {(() => {
-                                      if (item.status === "Paid") return null;
+                                    {effectiveStatus !== "Paid" && (() => {
                                       const today = new Date(); today.setHours(0,0,0,0);
                                       const defaultDue = item.dueDate || (() => { const d = new Date(item.date); d.setDate(d.getDate() + 30); return d.toISOString().split("T")[0]; })();
                                       const due = new Date(defaultDue); due.setHours(0,0,0,0);
                                       const diff = Math.round((due - today) / 86400000);
-                                      if (diff < 0) return <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-100 text-red-700 text-[11px] font-bold w-fit"><AlertCircle size={12} />{Math.abs(diff)}d overdue</div>;
+                                      if (diff < 0) return <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-100 text-red-700 text-[11px] font-bold w-fit"><AlertCircle size={12} />{Math.abs(diff)}d overdue{lateFee > 0 ? ` · +$${lateFee.toLocaleString(undefined,{minimumFractionDigits:2})} late fee` : ""}</div>;
                                       if (diff <= 7) return <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-100 text-amber-700 text-[11px] font-bold w-fit"><CalendarClock size={12} />Due in {diff}d</div>;
                                       return <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-100 text-slate-500 text-[11px] w-fit"><CalendarClock size={12} />Due in {diff}d</div>;
                                     })()}
@@ -3066,9 +3658,75 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                                           <Input type="date" value={item.date} disabled={!!item.locked} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], date: e.target.value }; setInvoices(n); }} />
                                         </div>
                                       </div>
+                                      {/* Payment Terms + Due Date */}
+                                      <div className="grid grid-cols-2 gap-3">
+                                        <div className="space-y-1">
+                                          <label className="text-[10px] font-bold text-slate-400 uppercase">Payment Terms</label>
+                                          <select
+                                            value={item.paymentTerms || "Net 30"}
+                                            disabled={!!item.locked}
+                                            onChange={e => {
+                                              const terms = e.target.value;
+                                              const newDue = dueDateFromTerms(item.date, terms);
+                                              const n = [...invoices];
+                                              n[idx] = { ...n[idx], paymentTerms: terms, ...(newDue ? { dueDate: newDue } : {}) };
+                                              setInvoices(n);
+                                            }}
+                                            className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-50">
+                                            {PAYMENT_TERMS.map(t => <option key={t.label} value={t.label}>{t.label}</option>)}
+                                          </select>
+                                        </div>
+                                        <div className="space-y-1">
+                                          <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><CalendarClock size={10} />Due Date</label>
+                                          <Input type="date" value={item.dueDate || (() => { const d = new Date(item.date); d.setDate(d.getDate() + 30); return d.toISOString().split("T")[0]; })()} disabled={!!item.locked} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], dueDate: e.target.value, paymentTerms: "Custom" }; setInvoices(n); }} />
+                                        </div>
+                                      </div>
+                                      {/* Late Fee */}
                                       <div className="space-y-1">
-                                        <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><CalendarClock size={10} />Due Date <span className="font-normal normal-case text-slate-300">(default 30 days)</span></label>
-                                        <Input type="date" value={item.dueDate || (() => { const d = new Date(item.date); d.setDate(d.getDate() + 30); return d.toISOString().split("T")[0]; })()} disabled={!!item.locked} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], dueDate: e.target.value }; setInvoices(n); }} />
+                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Late Fee</label>
+                                        <div className="flex gap-2">
+                                          <select
+                                            value={item.lateFeeType || "none"}
+                                            disabled={!!item.locked}
+                                            onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], lateFeeType: e.target.value }; setInvoices(n); }}
+                                            className="rounded-lg border border-gray-300 bg-white px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-50">
+                                            <option value="none">None</option>
+                                            <option value="flat">Flat fee ($)</option>
+                                            <option value="daily">Daily interest (%/day)</option>
+                                          </select>
+                                          {item.lateFeeType && item.lateFeeType !== "none" && (
+                                            <Input
+                                              type="number"
+                                              value={item.lateFeeRate || ""}
+                                              disabled={!!item.locked}
+                                              placeholder={item.lateFeeType === "flat" ? "e.g. 50" : "e.g. 0.1"}
+                                              onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], lateFeeRate: e.target.value }; setInvoices(n); }}
+                                              className="flex-1"
+                                            />
+                                          )}
+                                        </div>
+                                        {lateFee > 0 && (
+                                          <p className="text-[11px] text-red-600 font-semibold">
+                                            Current late fee: ${lateFee.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                          </p>
+                                        )}
+                                      </div>
+                                      {/* Amount Received (Partial Payment) */}
+                                      <div className="space-y-1">
+                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Amount Received ($)</label>
+                                        <Input
+                                          type="number"
+                                          value={item.amountReceived || ""}
+                                          disabled={!!item.locked}
+                                          placeholder="0.00"
+                                          onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], amountReceived: e.target.value }; setInvoices(n); }}
+                                        />
+                                        {effectiveStatus === "Partially Paid" && (
+                                          <p className="text-[11px] text-orange-600 font-semibold">
+                                            Balance owed: ${amountOwed.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                            {lateFee > 0 ? ` + $${lateFee.toLocaleString(undefined, { minimumFractionDigits: 2 })} late fee` : ""}
+                                          </p>
+                                        )}
                                       </div>
                                     </div>
                                   </div>
@@ -3076,10 +3734,10 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                                     <Button variant="outline" className="flex-none" onClick={() => setPreviewItem(item)} title="Preview invoice">
                                       <Eye size={15} className="mr-1.5" /> View
                                     </Button>
-                                    {item.status !== "Paid" ? (
-                                      <Button variant="success" className="flex-1" onClick={() => { const n = [...invoices]; n[idx] = { ...n[idx], status: "Paid" }; setInvoices(n); }}>Mark as Paid</Button>
+                                    {effectiveStatus !== "Paid" ? (
+                                      <Button variant="success" className="flex-1" onClick={() => { const n = [...invoices]; n[idx] = { ...n[idx], status: "Paid", amountReceived: n[idx].amount }; setInvoices(n); }}>Mark as Paid</Button>
                                     ) : (
-                                      <Button variant="outline" className="flex-1 text-emerald-600 border-emerald-200 hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-colors group" onClick={() => { const n = [...invoices]; n[idx] = { ...n[idx], status: "Unpaid" }; setInvoices(n); }} title="Click to mark as unpaid">
+                                      <Button variant="outline" className="flex-1 text-emerald-600 border-emerald-200 hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-colors group" onClick={() => { const n = [...invoices]; n[idx] = { ...n[idx], status: "Unpaid", amountReceived: 0 }; setInvoices(n); }} title="Click to mark as unpaid">
                                         <CheckCircle size={15} className="mr-1.5 group-hover:hidden" />
                                         <X size={15} className="mr-1.5 hidden group-hover:inline" />
                                         <span className="group-hover:hidden">Paid</span>
@@ -3402,6 +4060,24 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                         })}
                       </tr>
                     ))}
+                    <tr className="bg-sky-50 border-t border-sky-200">
+                      <td className="px-3 py-1.5 text-[10px] font-bold text-sky-700 uppercase border-r border-slate-200 whitespace-nowrap">Day Type</td>
+                      {newTimecard.days.map((d, i) => {
+                        const isWeekend = i === 0 || i === 6;
+                        return (
+                          <td key={i} className={`px-1 py-1.5 border-r border-slate-100 last:border-r-0 text-center ${isWeekend ? "bg-amber-50/60" : ""}`}>
+                            <select value={d.type || "work"}
+                              onChange={e => setNewTimecard(p => ({ ...p, days: p.days.map((day, idx) => idx !== i ? day : { ...day, type: e.target.value }) }))}
+                              className="w-full text-[10px] border border-sky-200 rounded px-0.5 py-0.5 bg-white focus:outline-none focus:border-blue-400 text-slate-700">
+                              <option value="work">Work</option>
+                              <option value="hold">Hold</option>
+                              <option value="travel">Travel</option>
+                              <option value="off">Off</option>
+                            </select>
+                          </td>
+                        );
+                      })}
+                    </tr>
                     <tr className="bg-orange-50 border-t border-orange-200">
                       <td className="px-3 py-1.5 text-[10px] font-bold text-orange-700 uppercase border-r border-slate-200 whitespace-nowrap">Meal Penalty</td>
                       {newTimecard.days.map((d, i) => {
@@ -3741,6 +4417,9 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                                     </Button>
                                     <Button variant="outline" className="flex-none" title="Download PDF" onClick={() => downloadTimecardPDF(entry)}>
                                       <Download size={14} className="mr-1.5" />PDF
+                                    </Button>
+                                    <Button variant="outline" className="flex-none text-violet-600 border-violet-200 hover:bg-violet-50" title="Export to payroll portal (EP, GreenSlate, CAPS)" onClick={() => { setExportEntry(entry); setShowExportModal(true); }}>
+                                      <FileDown size={14} className="mr-1.5" />Export
                                     </Button>
                                     {blobCache.current.has(entry.id) && (
                                       <Button variant="outline" className="flex-none" onClick={() => setPreviewItem(entry)} title="Preview timecard">
@@ -4343,6 +5022,131 @@ ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;
                 </>
               )}
             </>
+          );
+        })()}
+
+        {/* ── PRODUCTION CALENDAR ── */}
+        {activeTab === "calendar" && (() => {
+          const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+          const today = new Date().toISOString().split("T")[0];
+
+          // Build event map from timecards + invoices
+          const eventMap = {};
+          const addEv = (date, ev) => { if (!date) return; if (!eventMap[date]) eventMap[date] = []; eventMap[date].push(ev); };
+
+          timecards.forEach(tc => {
+            (tc.days || []).forEach(d => {
+              const type = d.type || "work";
+              const hasWork = !!(d.call || d.totalHours > 0);
+              if (type === "hold") {
+                addEv(d.date, { kind: "hold", label: tc.company || "Hold Day", tc });
+              } else if (type === "travel") {
+                addEv(d.date, { kind: "travel", label: (tc.company || "Travel") + " · Travel", tc });
+              } else if (type === "work" && hasWork) {
+                addEv(d.date, { kind: "shoot", label: tc.company || "Shoot Day", hours: d.totalHours, tc });
+              }
+            });
+          });
+
+          invoices.forEach(inv => {
+            if (inv.dueDate) {
+              const s = computeInvoiceStatus(inv);
+              const isPaid = s === "Paid";
+              const isOverdue = !isPaid && inv.dueDate < today;
+              addEv(inv.dueDate, { kind: isPaid ? "inv-paid" : isOverdue ? "inv-overdue" : "inv-due", label: `${inv.company || "Invoice"} — Due`, amount: inv.amount, inv });
+            }
+          });
+
+          // Build grid for calYear / calMonth
+          const firstDow = new Date(calYear, calMonth, 1).getDay();
+          const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
+          const cells = [];
+          for (let i = 0; i < firstDow; i++) cells.push(null);
+          for (let d = 1; d <= daysInMonth; d++) {
+            const iso = `${calYear}-${String(calMonth + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+            cells.push({ d, iso, evs: eventMap[iso] || [] });
+          }
+          while (cells.length % 7 !== 0) cells.push(null);
+
+          const prevMonth = () => { const dt = new Date(calYear, calMonth - 1, 1); setCalMonth(dt.getMonth()); setCalYear(dt.getFullYear()); };
+          const nextMonth = () => { const dt = new Date(calYear, calMonth + 1, 1); setCalMonth(dt.getMonth()); setCalYear(dt.getFullYear()); };
+
+          const kindStyle = { shoot: "bg-blue-100 text-blue-800", hold: "bg-amber-100 text-amber-800", travel: "bg-purple-100 text-purple-800", "inv-due": "bg-orange-100 text-orange-800", "inv-overdue": "bg-red-100 text-red-800", "inv-paid": "bg-emerald-100 text-emerald-700" };
+          const kindDot = { shoot: "🎬", hold: "⏸", travel: "✈", "inv-due": "💰", "inv-overdue": "⚠", "inv-paid": "✓" };
+
+          return (
+            <div className="space-y-4">
+              {/* Navigation */}
+              <div className="flex items-center justify-between bg-white border border-slate-200 rounded-xl px-5 py-3 shadow-sm">
+                <button onClick={prevMonth} className="p-2 rounded-lg hover:bg-slate-100 transition-colors text-slate-600"><ChevronLeft size={18} /></button>
+                <div className="text-center">
+                  <h2 className="text-xl font-bold text-slate-800">{MONTH_NAMES[calMonth]} {calYear}</h2>
+                  <button onClick={() => { setCalMonth(new Date().getMonth()); setCalYear(new Date().getFullYear()); }} className="text-[10px] text-blue-500 hover:underline mt-0.5">Today</button>
+                </div>
+                <button onClick={nextMonth} className="p-2 rounded-lg hover:bg-slate-100 transition-colors text-slate-600"><ChevronRight size={18} /></button>
+              </div>
+
+              {/* Day-of-week headers */}
+              <div className="grid grid-cols-7 gap-1 px-0.5">
+                {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(dn => (
+                  <div key={dn} className="text-center text-[10px] font-bold text-slate-400 uppercase tracking-wider py-1">{dn}</div>
+                ))}
+              </div>
+
+              {/* Calendar grid */}
+              <div className="grid grid-cols-7 gap-1">
+                {cells.map((cell, ci) => (
+                  <div key={ci} className={`min-h-[88px] rounded-xl border p-1.5 flex flex-col ${ cell === null ? "bg-transparent border-transparent" : cell.iso === today ? "border-blue-400 bg-blue-50 shadow-sm" : "border-slate-200 bg-white hover:border-blue-200 transition-colors" }`}>
+                    {cell && (
+                      <>
+                        <div className={`text-xs font-bold mb-1 self-start w-6 h-6 flex items-center justify-center rounded-full ${cell.iso === today ? "bg-blue-600 text-white" : "text-slate-600"}`}>{cell.d}</div>
+                        <div className="space-y-0.5 flex-1">
+                          {cell.evs.slice(0, 3).map((ev, ei) => (
+                            <div key={ei} className={`text-[9px] px-1 py-0.5 rounded truncate font-medium leading-tight ${kindStyle[ev.kind] || "bg-slate-100 text-slate-700"}`} title={ev.label + (ev.hours ? ` (${ev.hours}h)` : "") + (ev.amount ? ` · $${(parseFloat(ev.amount)||0).toLocaleString()}` : "")}>
+                              {kindDot[ev.kind]} {ev.label}
+                            </div>
+                          ))}
+                          {cell.evs.length > 3 && <div className="text-[9px] text-slate-400 font-medium pl-1">+{cell.evs.length - 3} more</div>}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* Legend */}
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Legend</span>
+                {[{ kind: "shoot", label: "Shoot Day" }, { kind: "hold", label: "Hold Day" }, { kind: "travel", label: "Travel" }, { kind: "inv-due", label: "Payment Due" }, { kind: "inv-overdue", label: "Overdue" }, { kind: "inv-paid", label: "Inv. Paid" }].map(({ kind, label }) => (
+                  <span key={kind} className={`text-[10px] px-2.5 py-1 rounded-full font-medium ${kindStyle[kind]}`}>{kindDot[kind]} {label}</span>
+                ))}
+              </div>
+
+              {/* Upcoming events */}
+              {(() => {
+                const upcoming = Object.entries(eventMap)
+                  .filter(([d]) => d >= today)
+                  .sort(([a], [b]) => a.localeCompare(b))
+                  .slice(0, 8)
+                  .flatMap(([d, evs]) => evs.map(ev => ({ ...ev, date: d })));
+                if (upcoming.length === 0) return null;
+                return (
+                  <Card className="p-5">
+                    <h3 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><CalendarClock size={15} className="text-blue-500" />Upcoming Events</h3>
+                    <div className="space-y-2">
+                      {upcoming.map((ev, i) => (
+                        <div key={i} className="flex items-center gap-3">
+                          <span className="text-xs font-mono text-slate-500 w-24 shrink-0">{new Date(ev.date + "T12:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>
+                          <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${kindStyle[ev.kind]}`}>{kindDot[ev.kind]} {ev.kind === "shoot" ? "Shoot" : ev.kind === "hold" ? "Hold" : ev.kind === "travel" ? "Travel" : "Invoice"}</span>
+                          <span className="text-sm text-slate-700 truncate">{ev.label}</span>
+                          {ev.amount && <span className="text-xs font-semibold text-slate-500 ml-auto shrink-0">${(parseFloat(ev.amount)||0).toLocaleString(undefined,{minimumFractionDigits:2})}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                );
+              })()}
+            </div>
           );
         })()}
 

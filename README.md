@@ -6,7 +6,7 @@
 
 <p align="center">
   A modern, full-featured financial tracking app for freelancers, contractors, and gig workers.<br/>
-  Track invoices, timecards, expenses, mileage, and kit rentals — all in one place.
+  Track invoices, timecards, expenses, mileage, kit rentals, and production schedules — all in one place.
 </p>
 
 <p align="center">
@@ -47,8 +47,8 @@
 
 | Platform | Link |
 |----------|------|
-| macOS (Universal — Apple Silicon + Intel) | [Have I Been Paid-1.1.3-universal.dmg](https://github.com/rmendoza050288-coder/have-i-been-paid/releases/latest) |
-| Windows (x64) | [Have I Been Paid Setup 1.1.3.exe](https://github.com/rmendoza050288-coder/have-i-been-paid/releases/latest) |
+| macOS (Universal — Apple Silicon + Intel) | [Have I Been Paid-1.5.0-universal.dmg](https://github.com/rmendoza050288-coder/have-i-been-paid/releases/latest) |
+| Windows (x64) | [Have I Been Paid Setup 1.5.0.exe](https://github.com/rmendoza050288-coder/have-i-been-paid/releases/latest) |
 
 ---
 
@@ -66,8 +66,10 @@
 - **Detailed Timecards** — Create weekly timecards with per-day call/wrap/meal-break times
 - **Multi-Rate Hours** — Auto-calculate straight, 1.5×, and 2× overtime
 - **Guaranteed Hours** — Supports guaranteed minimums and meal penalty tracking
+- **Day Type Tags** — Mark each day as Work, Hold, Travel, or Off for accurate payroll and calendar display
 - **Mileage per Job** — Log mileage on each timecard day for IRS write-off tracking
 - **Digital Signatures** — Sign timecards with custom handwriting-style fonts
+- **Payroll Portal Export** *(v1.5.0)* — Generate print-ready official timecards in EP Non-Union, GreenSlate, and CAPS formats — pre-filled with your entered data, ready to print or save as PDF
 
 ### 💼 Job & Client Management
 - **Jobs / Shows** — Create and organize projects; link timecards and invoices to each job
@@ -85,7 +87,13 @@
 - **Vehicle Expenses** — Record fuel, maintenance, tires, and other vehicle costs
 - **Gas Log** — Track fuel fill-ups per vehicle
 
-### 📊 Analytics & Reporting
+### � Production Calendar *(v1.5.0)*
+- **Monthly Calendar View** — See all shoot days, hold days, travel days, and invoice due dates at a glance
+- **Color-Coded Events** — 🎬 Shoot days (blue), ⏸ Hold days (amber), ✈ Travel days (purple), 💰 Invoice due (orange), ⚠ Overdue (red), ✓ Paid (green)
+- **Upcoming Events Panel** — Next 8 events across all months shown in a quick-reference list
+- **Month Navigation** — Step through months with Prev/Next controls or jump to Today
+
+### �📊 Analytics & Reporting
 - **Earnings Dashboard** — See total billed, received, outstanding, and estimated taxes at a glance
 - **Year Filter** — Instantly switch between tax years
 - **Mileage Tax Report** — Generate a printable IRS mileage summary
@@ -172,6 +180,14 @@ All data lives in `offline_files/Have I Been Paid_/data.json` (split by year). U
 ---
 
 ## Changelog
+
+### v1.5.0 — May 29, 2026
+- **Production Calendar** — New Calendar tab showing all timecard days and invoice due dates on a monthly grid with color-coded event chips and an Upcoming Events panel
+- **Day Type field** — Each timecard day can now be tagged as Work, Hold, Travel, or Off; feeds the calendar and payroll exports
+- **Payroll Portal Timecard Export** — Export button on every timecard opens a format picker that generates a fully pre-filled, print-ready HTML timecard in the official layout for:
+  - Entertainment Partners (EP) Non-Union Crew Time Card
+  - GreenSlate Crew Time Card (with Gross Hours, Other Earnings, Per Diem, and Total Gross sections)
+  - CAPS (Cast & Crew) Crew Time Card (with AICP fields, dual-meal rows, and CA MPN notice)
 
 ### v1.1.3 — May 1, 2026
 - Add logo upload support on invoices (PNG, JPG, SVG — embedded in generated HTML)
