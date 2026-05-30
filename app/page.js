@@ -35,6 +35,7 @@ import {
   Calendar,
   ChevronLeft,
   FileDown,
+  Copy,
 } from "lucide-react";
 
 const Card = ({ children, className = "" }) => (
@@ -417,6 +418,45 @@ function get6thDayIndex(days) {
   return worked[5].i;
 }
 
+// Returns a Set of day indices where turnaround from previous day's wrap is < 10 hours
+function calcTurnaroundViolations(days) {
+  const violations = new Set();
+  for (let i = 1; i < days.length; i++) {
+    const prev = days[i - 1];
+    const curr = days[i];
+    if (!prev.wrap || !curr.call || !prev.date || !curr.date) continue;
+    const wrapMs = new Date(prev.date + "T" + prev.wrap).getTime();
+    const callMs = new Date(curr.date + "T" + curr.call).getTime();
+    if (isNaN(wrapMs) || isNaN(callMs)) continue;
+    const gapHours = (callMs - wrapMs) / 3600000;
+    if (gapHours > 0 && gapHours < 10) violations.add(i);
+  }
+  return violations;
+}
+
+// Returns true if meal penalty should be auto-flagged (>6h worked, no meal break logged)
+function shouldAutoMealPenalty(day) {
+  if (!day.call || !day.wrap) return false;
+  const hours = day.totalHours ?? calcDayHours(day);
+  if (hours <= 6) return false;
+  if (day.meal1Out && day.meal1In) return false;
+  return true;
+}
+
+// Generates a CSV string from an array of row arrays and triggers a download
+function downloadCSV(rows, filename) {
+  const escape = v => {
+    const s = v == null ? "" : String(v);
+    return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const csv = rows.map(r => r.map(escape).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
 const TAX_RATE = 0.25;
 const IRS_MILEAGE_RATE = 0.70; // 2025 IRS standard mileage rate ($/mi)
 
@@ -500,10 +540,17 @@ export default function App() {
   const [paystubUploading, setPaystubUploading] = useState(null); // invoiceId being processed
   const [syncStatus, setSyncStatus] = useState("Not synced");
   const [previewItem, setPreviewItem] = useState(null);
-  const [newTimecard, setNewTimecard] = useState(() => { const we = getNextSaturday(); return { company: "", jobName: "", jobClassification: "", guarHours: "10", rate: "", dayRate: "", dayRateType: "10", weekEnding: we, days: initWeekDays(we), description: "", jobId: "", workerName: "", workerEmail: "", last4SS: "", mileage: "", workPerDiem: "", daysOffPerDiem: "", signatureFont: "Dancing Script", signatureDate: new Date().toISOString().split("T")[0] }; });
+  const [newTimecard, setNewTimecard] = useState(() => { const we = getNextSaturday(); return { company: "", jobName: "", jobClassification: "", guarHours: "10", rate: "", dayRate: "", dayRateType: "10", weekEnding: we, days: initWeekDays(we), description: "", jobId: "", workerName: "", workerEmail: "", last4SS: "", mileage: "", workPerDiem: "", daysOffPerDiem: "", kitRentalRate: "", signatureFont: "Dancing Script", signatureDate: new Date().toISOString().split("T")[0] }; });
   const [editingTimecard, setEditingTimecard] = useState(null);
   const [calMonth, setCalMonth] = useState(new Date().getMonth());
   const [calYear, setCalYear] = useState(new Date().getFullYear());
+  const [holdDays, setHoldDays] = useState([]);
+  const [calSelectMode, setCalSelectMode] = useState(false);
+  const [calSelectedDates, setCalSelectedDates] = useState([]);
+  const [holdNamePrompt, setHoldNamePrompt] = useState(false);
+  const [holdNameInput, setHoldNameInput] = useState("");
+  const [holdTypeInput, setHoldTypeInput] = useState("hold");
+  const [holdReleaseModal, setHoldReleaseModal] = useState(null); // { holdId, date }
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportEntry, setExportEntry] = useState(null);
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
@@ -585,6 +632,7 @@ export default function App() {
         if (Array.isArray(d.gasLogs)) setGasLogs(d.gasLogs);
         if (Array.isArray(d.kitPackages)) setKitPackages(d.kitPackages);
         if (Array.isArray(d.clients)) setClients(d.clients);
+        if (Array.isArray(d.holdDays)) setHoldDays(d.holdDays);
       }
       const ls = localStorage.getItem("hibp_last_synced");
       if (ls) setLastSynced(ls);
@@ -712,9 +760,9 @@ export default function App() {
   // Depends on `hydrated` so it only fires after the load effect's setState calls have rendered.
   useEffect(() => {
     if (!hydrated) return;
-    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients };
+    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients, holdDays };
     try { localStorage.setItem("hibp_data", JSON.stringify(data)); } catch {}
-  }, [hydrated, invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients]);
+  }, [hydrated, invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients, holdDays]);
 
   // ── EXPORT / RELINK ──────────────────────────────────────────────────────────
   const exportData = () => {
@@ -1151,10 +1199,13 @@ export default function App() {
     const workPerDiem = parseFloat(newTimecard.workPerDiem) || 0;
     const daysOffPerDiem = parseFloat(newTimecard.daysOffPerDiem) || 0;
     const perDiemTotal = parseFloat(days.reduce((a, d) => a + (d.perDiemWork ? workPerDiem : 0) + (d.perDiemOff ? daysOffPerDiem : 0), 0).toFixed(2));
-    const total = parseFloat((days.reduce((a, d) => a + (d.hours1x * rate) + (d.hours15x * rate * 1.5) + (d.hours2x * rate * 2), 0) + mealPenaltyPay + perDiemTotal).toFixed(2));
-    setTimecards(prev => [{ id: crypto.randomUUID(), company: newTimecard.company, jobName: newTimecard.jobName, jobClassification: newTimecard.jobClassification, guarHours, hours, rate, dayRate: parseFloat(newTimecard.dayRate) || 0, dayRateType: newTimecard.dayRateType || "10", total, mealPenaltyPay, workPerDiem, daysOffPerDiem, perDiemTotal, date: newTimecard.weekEnding, days, description: newTimecard.description, status: "Unpaid", jobId: newTimecard.jobId || "", workerName: newTimecard.workerName || "", workerEmail: newTimecard.workerEmail || "", last4SS: newTimecard.last4SS || "", mileage: parseFloat(newTimecard.mileage) || 0, signatureName: newTimecard.workerName || "", signatureFont: newTimecard.signatureFont || "Dancing Script", signatureDate: newTimecard.signatureDate || "", locked: true, timestamp: Date.now() }, ...prev]);
+    const kitRentalRate = parseFloat(newTimecard.kitRentalRate) || 0;
+    const kitRentalDays = days.filter(d => d.totalHours > 0 || d.call).length;
+    const kitRentalPay = parseFloat((kitRentalRate * kitRentalDays).toFixed(2));
+    const total = parseFloat((days.reduce((a, d) => a + (d.hours1x * rate) + (d.hours15x * rate * 1.5) + (d.hours2x * rate * 2), 0) + mealPenaltyPay + perDiemTotal + kitRentalPay).toFixed(2));
+    setTimecards(prev => [{ id: crypto.randomUUID(), company: newTimecard.company, jobName: newTimecard.jobName, jobClassification: newTimecard.jobClassification, guarHours, hours, rate, dayRate: parseFloat(newTimecard.dayRate) || 0, dayRateType: newTimecard.dayRateType || "10", total, mealPenaltyPay, workPerDiem, daysOffPerDiem, perDiemTotal, kitRentalRate, kitRentalPay, date: newTimecard.weekEnding, days, description: newTimecard.description, status: "Unpaid", jobId: newTimecard.jobId || "", workerName: newTimecard.workerName || "", workerEmail: newTimecard.workerEmail || "", last4SS: newTimecard.last4SS || "", mileage: parseFloat(newTimecard.mileage) || 0, signatureName: newTimecard.workerName || "", signatureFont: newTimecard.signatureFont || "Dancing Script", signatureDate: newTimecard.signatureDate || "", locked: true, timestamp: Date.now() }, ...prev]);
     if (newTimecard.jobId) setExpandedJobs(prev => { const n = new Set(prev); n.add(newTimecard.jobId); return n; });
-    setNewTimecard(p => { const we = p.weekEnding; return { company: "", jobName: "", jobClassification: "", guarHours: p.guarHours, rate: "", dayRate: "", dayRateType: p.dayRateType || "10", weekEnding: we, days: initWeekDays(we), description: "", jobId: p.jobId, workerName: p.workerName, workerEmail: p.workerEmail, last4SS: p.last4SS, mileage: "", workPerDiem: p.workPerDiem, daysOffPerDiem: p.daysOffPerDiem, signatureFont: p.signatureFont, signatureDate: new Date().toISOString().split("T")[0] }; });
+    setNewTimecard(p => { const we = p.weekEnding; return { company: "", jobName: "", jobClassification: "", guarHours: p.guarHours, rate: "", dayRate: "", dayRateType: p.dayRateType || "10", weekEnding: we, days: initWeekDays(we), description: "", jobId: p.jobId, workerName: p.workerName, workerEmail: p.workerEmail, last4SS: p.last4SS, mileage: "", workPerDiem: p.workPerDiem, daysOffPerDiem: p.daysOffPerDiem, kitRentalRate: p.kitRentalRate, signatureFont: p.signatureFont, signatureDate: new Date().toISOString().split("T")[0] }; });
   };
 
   const saveTimecardEdit = () => {
@@ -1168,11 +1219,14 @@ export default function App() {
     const workPerDiem = parseFloat(editingTimecard.workPerDiem) || 0;
     const daysOffPerDiem = parseFloat(editingTimecard.daysOffPerDiem) || 0;
     const perDiemTotal = parseFloat(days.reduce((a, d) => a + (d.perDiemWork ? workPerDiem : 0) + (d.perDiemOff ? daysOffPerDiem : 0), 0).toFixed(2));
-    const total = parseFloat((days.reduce((a, d) => a + (d.hours1x * rate) + (d.hours15x * rate * 1.5) + (d.hours2x * rate * 2), 0) + mealPenaltyPay + perDiemTotal).toFixed(2));
+    const kitRentalRate = parseFloat(editingTimecard.kitRentalRate) || 0;
+    const kitRentalDays = days.filter(d => d.totalHours > 0 || d.call).length;
+    const kitRentalPay = parseFloat((kitRentalRate * kitRentalDays).toFixed(2));
+    const total = parseFloat((days.reduce((a, d) => a + (d.hours1x * rate) + (d.hours15x * rate * 1.5) + (d.hours2x * rate * 2), 0) + mealPenaltyPay + perDiemTotal + kitRentalPay).toFixed(2));
     setTimecards(prev => prev.map(tc => tc.id !== editingTimecard.id ? tc : {
       ...tc, company: editingTimecard.company, jobName: editingTimecard.jobName,
       jobClassification: editingTimecard.jobClassification, guarHours, rate, dayRate: parseFloat(editingTimecard.dayRate) || 0, dayRateType: editingTimecard.dayRateType || "10", date: editingTimecard.weekEnding,
-      days, hours, total, mealPenaltyPay, workPerDiem, daysOffPerDiem, perDiemTotal, description: editingTimecard.description, jobId: editingTimecard.jobId || "",
+      days, hours, total, mealPenaltyPay, workPerDiem, daysOffPerDiem, perDiemTotal, kitRentalRate, kitRentalPay, description: editingTimecard.description, jobId: editingTimecard.jobId || "",
       workerName: editingTimecard.workerName || "", workerEmail: editingTimecard.workerEmail || "", last4SS: editingTimecard.last4SS || "",
       signatureName: editingTimecard.workerName || "", signatureFont: editingTimecard.signatureFont || "Dancing Script", signatureDate: editingTimecard.signatureDate || "",
       mileage: parseFloat(editingTimecard.mileage) || 0,
@@ -1208,7 +1262,7 @@ export default function App() {
         <td style="padding:5px 8px;text-align:center;font-size:11px;">${dailyTotalCell}</td>
       </tr>`;
     }).join("");
-    const wageSubtotal = (entry.total || 0) - (entry.mealPenaltyPay || 0) - (entry.perDiemTotal || 0);
+    const wageSubtotal = (entry.total || 0) - (entry.mealPenaltyPay || 0) - (entry.perDiemTotal || 0) - (entry.kitRentalPay || 0);
     const perDiemWorkDays = entry.days.filter(d => d.perDiemWork).length;
     const perDiemOffDays = entry.days.filter(d => d.perDiemOff).length;
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Timecard \u2013 ${entry.company}</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/><link href="https://fonts.googleapis.com/css2?family=Alex+Brush&family=Allura&family=Clicker+Script&family=Dancing+Script:wght@700&family=Great+Vibes&family=Italianno&family=Marck+Script&family=Pinyon+Script&family=Sacramento&family=Satisfy&family=Tangerine:wght@700&family=Yellowtail&display=swap" rel="stylesheet"/><style>body{font-family:Arial,sans-serif;margin:40px;font-size:12px;color:#1e293b;}table{width:100%;border-collapse:collapse;}th{background:#1e40af;color:#fff;padding:7px 8px;font-size:10px;text-transform:uppercase;text-align:center;}th:first-child{text-align:left;}tfoot td{background:#1e40af;color:#fff;font-weight:bold;padding:7px 8px;}@media print{body{margin:20px;}}</style></head><body>
@@ -1223,7 +1277,7 @@ export default function App() {
   ${entry.jobClassification ? `<div><div style="font-size:9px;font-weight:bold;text-transform:uppercase;color:#64748b;">Classification</div><div style="font-size:13px;font-weight:600;">${entry.jobClassification}</div></div>` : ""}
   ${entry.rate > 0 ? `<div><div style="font-size:9px;font-weight:bold;text-transform:uppercase;color:#64748b;">Rate</div><div style="font-size:13px;font-weight:600;">$${entry.rate}/hr</div></div>` : ""}
 </div>
-<table><thead><tr><th>Day</th><th>Call</th><th>Meal 1</th><th>Meal 2</th><th>Wrap</th><th>Hrs Worked</th><th>OT</th><th>Meal Penalty</th><th>Daily Total</th></tr></thead><tbody>${rowsHtml}</tbody><tfoot><tr><td colspan="5" style="text-align:left;">WEEK TOTAL (Wages)</td><td style="text-align:center;">${entry.hours}h</td><td colspan="2" style="text-align:center;">&nbsp;</td><td style="text-align:center;font-weight:bold;">$${wageSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>${perDiemWorkDays > 0 ? `<tr><td colspan="5" style="text-align:left;">Per Diem \u2014 Work Days (${perDiemWorkDays} day${perDiemWorkDays !== 1 ? "s" : ""} \u00d7 $${(entry.workPerDiem || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}/day)</td><td colspan="3" style="text-align:center;">&nbsp;</td><td style="text-align:center;">$${((entry.workPerDiem || 0) * perDiemWorkDays).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>` : ""}${perDiemOffDays > 0 ? `<tr><td colspan="5" style="text-align:left;">Per Diem \u2014 Days Off (${perDiemOffDays} day${perDiemOffDays !== 1 ? "s" : ""} \u00d7 $${(entry.daysOffPerDiem || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}/day)</td><td colspan="3" style="text-align:center;">&nbsp;</td><td style="text-align:center;">$${((entry.daysOffPerDiem || 0) * perDiemOffDays).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>` : ""}${(entry.mealPenaltyPay || 0) > 0 ? `<tr><td colspan="5" style="text-align:left;">Meal Penalty (${entry.days.filter(d => d.mealPenalty).length} day${entry.days.filter(d => d.mealPenalty).length !== 1 ? "s" : ""} \u00d7 1hr base)</td><td colspan="3" style="text-align:center;">&nbsp;</td><td style="text-align:center;">$${(entry.mealPenaltyPay).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>` : ""}${((entry.mealPenaltyPay || 0) > 0 || (entry.perDiemTotal || 0) > 0) ? `<tr><td colspan="5" style="text-align:left;font-size:13px;">TOTAL DUE</td><td colspan="3" style="text-align:center;">&nbsp;</td><td style="text-align:center;font-size:13px;">$${(entry.total || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>` : ""}</tfoot></table>
+<table><thead><tr><th>Day</th><th>Call</th><th>Meal 1</th><th>Meal 2</th><th>Wrap</th><th>Hrs Worked</th><th>OT</th><th>Meal Penalty</th><th>Daily Total</th></tr></thead><tbody>${rowsHtml}</tbody><tfoot><tr><td colspan="5" style="text-align:left;">WEEK TOTAL (Wages)</td><td style="text-align:center;">${entry.hours}h</td><td colspan="2" style="text-align:center;">&nbsp;</td><td style="text-align:center;font-weight:bold;">$${wageSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>${perDiemWorkDays > 0 ? `<tr><td colspan="5" style="text-align:left;">Per Diem \u2014 Work Days (${perDiemWorkDays} day${perDiemWorkDays !== 1 ? "s" : ""} \u00d7 $${(entry.workPerDiem || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}/day)</td><td colspan="3" style="text-align:center;">&nbsp;</td><td style="text-align:center;">$${((entry.workPerDiem || 0) * perDiemWorkDays).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>` : ""}${perDiemOffDays > 0 ? `<tr><td colspan="5" style="text-align:left;">Per Diem \u2014 Days Off (${perDiemOffDays} day${perDiemOffDays !== 1 ? "s" : ""} \u00d7 $${(entry.daysOffPerDiem || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}/day)</td><td colspan="3" style="text-align:center;">&nbsp;</td><td style="text-align:center;">$${((entry.daysOffPerDiem || 0) * perDiemOffDays).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>` : ""}${(entry.mealPenaltyPay || 0) > 0 ? `<tr><td colspan="5" style="text-align:left;">Meal Penalty (${entry.days.filter(d => d.mealPenalty).length} day${entry.days.filter(d => d.mealPenalty).length !== 1 ? "s" : ""} \u00d7 1hr base)</td><td colspan="3" style="text-align:center;">&nbsp;</td><td style="text-align:center;">$${(entry.mealPenaltyPay).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>` : ""}${(entry.kitRentalPay || 0) > 0 ? `<tr><td colspan="5" style="text-align:left;">Kit/Box Rental (${entry.days.filter(d => d.totalHours > 0 || d.call).length} day${entry.days.filter(d => d.totalHours > 0 || d.call).length !== 1 ? "s" : ""} \u00d7 $${(entry.kitRentalRate || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}/day)</td><td colspan="3" style="text-align:center;">&nbsp;</td><td style="text-align:center;">$${(entry.kitRentalPay).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>` : ""}${((entry.mealPenaltyPay || 0) > 0 || (entry.perDiemTotal || 0) > 0 || (entry.kitRentalPay || 0) > 0) ? `<tr><td colspan="5" style="text-align:left;font-size:13px;">TOTAL DUE</td><td colspan="3" style="text-align:center;">&nbsp;</td><td style="text-align:center;font-size:13px;">$${(entry.total || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td></tr>` : ""}</tfoot></table>
 ${entry.description ? `<div style="margin-top:12px;font-size:11px;color:#475569;"><strong>Notes:</strong> ${entry.description}</div>` : ""}
 <div style="margin-top:36px;border-top:1px solid #cbd5e1;padding-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:40px;">
   <div>
@@ -1722,9 +1776,22 @@ ${printStyle}</style></head><body>
     setShowInvoiceGenerator(true);
   };
 
+  const duplicateInvoice = (source) => {
+    const today = new Date().toISOString().split("T")[0];
+    const dueD = new Date(); dueD.setDate(dueD.getDate() + 30);
+    const y = new Date().getFullYear(), mo = String(new Date().getMonth() + 1).padStart(2, "0"), dy = String(new Date().getDate()).padStart(2, "0");
+    const num = `INV-${y}${mo}${dy}-001`;
+    setInvoiceForm({
+      ...source,
+      invoiceNumber: num,
+      invoiceDate: today,
+      dueDate: dueD.toISOString().split("T")[0],
+      lineItems: (source.lineItems || []).map(li => ({ ...li, id: crypto.randomUUID() })),
+    });
+    setShowInvoiceGenerator(true);
+  };
+
   const updateLineItem = (id, field, val) => {
-    setInvoiceForm(prev => {
-      const items = prev.lineItems.map(li => {
         if (li.id !== id) return li;
         const updated = { ...li, [field]: val };
         if (field === "qty" || field === "rate") {
@@ -2401,6 +2468,157 @@ ${printStyle}</style></head><body>
         </div>
       )}
 
+      {/* ── Hold Day Release Modal ── */}
+      {holdReleaseModal && (() => {
+        const hd = holdDays.find(h => h.id === holdReleaseModal.holdId);
+        if (!hd) { setHoldReleaseModal(null); return null; }
+        const dateLabel = new Date(holdReleaseModal.date + "T12:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+        const isDatesArray = Array.isArray(hd.dates);
+        const released = new Set(hd.releasedDates || []);
+        const total = isDatesArray ? hd.dates.length : (() => { const s = new Date(hd.startDate + "T12:00"); const e = new Date(hd.endDate + "T12:00"); return Math.round((e - s) / 86400000) + 1; })();
+        const remaining = total - released.size;
+        return (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setHoldReleaseModal(null)}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 space-y-4" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2"><span className="text-xl">⏸</span> Release Hold</h2>
+                <button onClick={() => setHoldReleaseModal(null)} className="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+              </div>
+              {(() => {
+                const htStyles = { soft: "bg-pink-50 border-pink-200", hold: "bg-blue-50 border-blue-200", locked: "bg-orange-50 border-orange-200", travel: "bg-purple-50 border-purple-200" };
+                const htText = { soft: "text-pink-800", hold: "text-blue-800", locked: "text-orange-900", travel: "text-purple-800" };
+                const htSub = { soft: "text-pink-600", hold: "text-blue-600", locked: "text-orange-700", travel: "text-purple-600" };
+                const htDots = { soft: "✏️", hold: "⏸", locked: "🔒", travel: "✈️" };
+                const htLabels = { soft: "Soft Hold", hold: "Hold", locked: "Locked", travel: "Travel" };
+                const t = hd.type || "hold";
+                return (
+                  <div className={`border rounded-xl p-3 space-y-1 ${htStyles[t] || htStyles.hold}`}>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-base leading-none">{htDots[t]}</span>
+                      <span className={`text-[10px] font-bold uppercase tracking-wide ${htText[t] || htText.hold}`}>{htLabels[t] || "Hold"}</span>
+                    </div>
+                    <p className={`text-sm font-bold ${htText[t] || htText.hold}`}>{hd.company}</p>
+                    <p className={`text-xs ${htSub[t] || htSub.hold}`}>{remaining} of {total} day{total !== 1 ? "s" : ""} active</p>
+                  </div>
+                );
+              })()}
+              <p className="text-xs text-slate-500">What would you like to release?</p>
+              <div className="space-y-2">
+                <button
+                  onClick={() => {
+                    if (isDatesArray) {
+                      // Remove from the dates array directly
+                      const newDates = hd.dates.filter(d => d !== holdReleaseModal.date);
+                      if (newDates.length === 0) {
+                        setHoldDays(prev => prev.filter(h => h.id !== hd.id));
+                      } else {
+                        setHoldDays(prev => prev.map(h => h.id === hd.id ? { ...h, dates: newDates } : h));
+                      }
+                    } else {
+                      setHoldDays(prev => prev.map(h => h.id === hd.id
+                        ? { ...h, releasedDates: [...new Set([...(h.releasedDates || []), holdReleaseModal.date])] }
+                        : h
+                      ));
+                    }
+                    setHoldReleaseModal(null);
+                  }}
+                  className="w-full text-left px-4 py-3 rounded-xl border border-amber-200 hover:bg-amber-50 transition-colors"
+                >
+                  <p className="text-sm font-bold text-amber-800">Release this day only</p>
+                  <p className="text-xs text-amber-600 mt-0.5">{dateLabel}</p>
+                </button>
+                <button
+                  onClick={() => {
+                    setHoldDays(prev => prev.filter(h => h.id !== hd.id));
+                    setHoldReleaseModal(null);
+                  }}
+                  className="w-full text-left px-4 py-3 rounded-xl border border-red-200 hover:bg-red-50 transition-colors"
+                >
+                  <p className="text-sm font-bold text-red-700">Release entire hold</p>
+                  <p className="text-xs text-red-500 mt-0.5">Remove all {remaining} remaining day{remaining !== 1 ? "s" : ""} for this job</p>
+                </button>
+              </div>
+              <button onClick={() => setHoldReleaseModal(null)} className="w-full px-4 py-2 text-sm font-semibold border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-600 transition-colors">Cancel</button>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Hold Name Prompt Modal ── */}
+      {holdNamePrompt && (() => {
+        const typeConfig = {
+          soft: { label: "Soft Hold", dot: "✏️", desc: "Tentative, can be moved", style: "border-pink-400 bg-pink-50 text-pink-800", ring: "ring-pink-400" },
+          hold: { label: "Hold", dot: "⏸", desc: "Standard hold", style: "border-blue-400 bg-blue-50 text-blue-800", ring: "ring-blue-400" },
+          locked: { label: "Locked", dot: "🔒", desc: "Confirmed, do not move", style: "border-orange-400 bg-orange-50 text-orange-900", ring: "ring-orange-400" },
+          travel: { label: "Travel", dot: "✈️", desc: "Travel day", style: "border-purple-400 bg-purple-50 text-purple-800", ring: "ring-purple-400" },
+        };
+        const tc = typeConfig[holdTypeInput] || typeConfig.hold;
+        const applyHold = () => {
+          const newHd = { id: Date.now().toString(), type: holdTypeInput, company: holdNameInput.trim() || tc.label, dates: [...calSelectedDates].sort(), releasedDates: [] };
+          setHoldDays(prev => [...prev, newHd]);
+          setCalSelectedDates([]);
+          setCalSelectMode(false);
+          setHoldNamePrompt(false);
+          setHoldTypeInput("hold");
+        };
+        return (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setHoldNamePrompt(false)}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 space-y-4" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2"><span className="text-xl">{tc.dot}</span> Mark Days</h2>
+                <button onClick={() => setHoldNamePrompt(false)} className="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+              </div>
+              <p className="text-sm text-slate-500">Applying to <span className="font-bold text-amber-600">{calSelectedDates.length} day{calSelectedDates.length !== 1 ? "s" : ""}</span></p>
+
+              {/* Hold type selector */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-2">Hold Type</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {Object.entries(typeConfig).map(([key, cfg]) => (
+                    <button
+                      key={key}
+                      onClick={() => setHoldTypeInput(key)}
+                      className={`flex flex-col items-center gap-1 px-2 py-2.5 rounded-xl border-2 text-center transition-all ${holdTypeInput === key ? `${cfg.style} ring-2 ${cfg.ring} shadow-sm` : "border-slate-200 text-slate-500 hover:border-slate-300"}`}
+                    >
+                      <span className="text-lg leading-none">{cfg.dot}</span>
+                      <span className="text-[11px] font-bold leading-tight">{cfg.label}</span>
+                      <span className="text-[9px] leading-tight opacity-70">{cfg.desc}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Production / Company <span className="font-normal text-slate-400">(optional)</span></label>
+                <input
+                  autoFocus
+                  type="text"
+                  value={holdNameInput}
+                  onChange={e => setHoldNameInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") applyHold(); }}
+                  placeholder="e.g. Netflix — Untitled Project"
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+                />
+              </div>
+              <div className="flex gap-3 pt-1">
+                <button onClick={() => setHoldNamePrompt(false)} className="flex-1 px-4 py-2 text-sm font-semibold border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-600 transition-colors">Back</button>
+                <button
+                  onClick={applyHold}
+                  className={`flex-1 px-4 py-2 text-sm font-bold rounded-xl transition-colors text-white ${
+                    holdTypeInput === "soft" ? "bg-pink-500 hover:bg-pink-600" :
+                    holdTypeInput === "locked" ? "bg-orange-500 hover:bg-orange-600" :
+                    holdTypeInput === "travel" ? "bg-purple-600 hover:bg-purple-700" :
+                    "bg-blue-600 hover:bg-blue-700"
+                  }`}
+                >
+                  {tc.dot} Apply {tc.label}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Payroll Portal Export Modal ── */}
       {showExportModal && exportEntry && (() => {
         const formats = [
@@ -2562,6 +2780,10 @@ ${printStyle}</style></head><body>
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Day Off Per Diem ($)</label>
                   <Input type="number" value={editingTimecard.daysOffPerDiem || ""} onChange={e => setEditingTimecard(p => ({ ...p, daysOffPerDiem: e.target.value }))} placeholder="0" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Kit/Box Rental ($/day)</label>
+                  <Input type="number" value={editingTimecard.kitRentalRate || ""} onChange={e => setEditingTimecard(p => ({ ...p, kitRentalRate: e.target.value }))} placeholder="0" />
                 </div>
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Notes</label>
@@ -2758,6 +2980,7 @@ ${printStyle}</style></head><body>
                       <td className="px-3 py-1.5 text-[10px] font-bold text-emerald-700 uppercase border-r border-slate-200 whitespace-nowrap">Daily Total</td>
                       {(() => {
                         const sixthIdx = get6thDayIndex(editingTimecard.days);
+                        const seventhIdx = get7thDayIndex(editingTimecard.days);
                         const rate = parseFloat(editingTimecard.rate) || 0;
                         const guarH = parseFloat(editingTimecard.guarHours) || 0;
                         const wPD = parseFloat(editingTimecard.workPerDiem) || 0;
@@ -2765,7 +2988,7 @@ ${printStyle}</style></head><body>
                         return editingTimecard.days.map((d, i) => {
                           const h = calcDayHours(d);
                           const paidH = h > 0 ? Math.max(h, guarH) : 0;
-                          const ot = i === sixthIdx ? calcOTBreakdown6thDay(paidH) : calcOTBreakdown(paidH);
+                          const ot = i === seventhIdx ? calcOTBreakdown7thDay(paidH) : i === sixthIdx ? calcOTBreakdown6thDay(paidH) : calcOTBreakdown(paidH);
                           const perDiem = (d.perDiemWork ? wPD : 0) + (d.perDiemOff ? oPD : 0);
                           const dayTotal = ot.hours1x * rate + ot.hours15x * rate * 1.5 + ot.hours2x * rate * 2 + (d.mealPenalty ? rate : 0) + perDiem;
                           const isWeekend = i === 0 || i === 6;
@@ -2783,16 +3006,19 @@ ${printStyle}</style></head><body>
                       <td className="px-3 py-2 text-[10px] font-bold text-blue-100 uppercase border-r border-blue-500">Total Hrs</td>
                       {(() => {
                         const sixthIdx = get6thDayIndex(editingTimecard.days);
+                        const seventhIdx = get7thDayIndex(editingTimecard.days);
                         const guarH = parseFloat(editingTimecard.guarHours) || 0;
                         return editingTimecard.days.map((d, i) => {
                           const h = calcDayHours(d);
                           const paidH = h > 0 ? Math.max(h, guarH) : 0;
                           const is6th = i === sixthIdx;
-                          const ot = is6th ? calcOTBreakdown6thDay(paidH) : calcOTBreakdown(paidH);
+                          const is7th = i === seventhIdx;
+                          const ot = is7th ? calcOTBreakdown7thDay(paidH) : is6th ? calcOTBreakdown6thDay(paidH) : calcOTBreakdown(paidH);
                           const isWeekend = i === 0 || i === 6;
                           return (
                             <td key={i} className={`px-1 py-2 text-center border-r border-blue-500 last:border-r-0 ${isWeekend ? "bg-blue-700" : ""}`}>
                               <div className={`font-bold text-sm ${paidH > 0 ? "text-white" : "text-blue-400"}`}>{paidH > 0 ? paidH : "—"}</div>
+                              {is7th && paidH > 0 && <div className="text-[9px] text-rose-300 font-bold">7th day</div>}
                               {is6th && paidH > 0 && <div className="text-[9px] text-cyan-300 font-bold">6th day</div>}
                               {ot.hours15x > 0 && <div className="text-[9px] text-amber-300 font-medium">{ot.hours15x}h @1.5×</div>}
                               {ot.hours2x > 0 && <div className="text-[9px] text-red-300 font-medium">{ot.hours2x}h @2×</div>}
@@ -3512,6 +3738,46 @@ ${printStyle}</style></head><body>
               </Card>
             </div>
 
+            {/* YTD Summary card */}
+            {(() => {
+              const ytdYear = new Date().getFullYear();
+              const ytdInvoices = invoices.filter(i => { try { return new Date(i.date + "T12:00").getFullYear() === ytdYear; } catch { return false; } });
+              const ytdTimecards = timecards.filter(t => { try { return new Date(t.date + "T12:00").getFullYear() === ytdYear; } catch { return false; } });
+              const ytdBilled = ytdInvoices.reduce((a, i) => a + (parseFloat(i.amount) || 0), 0);
+              const ytdReceived = ytdInvoices.reduce((a, i) => {
+                const s = computeInvoiceStatus(i);
+                if (s === "Paid") return a + (parseFloat(i.amount) || 0);
+                if (s === "Partially Paid") return a + (parseFloat(i.amountReceived) || 0);
+                return a;
+              }, 0);
+              const ytdOutstanding = ytdBilled - ytdReceived;
+              const ytdEarned = ytdTimecards.reduce((a, t) => a + (parseFloat(t.total) || 0), 0);
+              const ytdEstTax = ytdReceived * TAX_RATE;
+              return (
+                <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-xl p-4 text-white">
+                  <p className="text-xs font-bold text-blue-200 uppercase tracking-wider mb-3">{ytdYear} Year-to-Date</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                    <div>
+                      <p className="text-blue-200 text-xs">TC Earnings</p>
+                      <p className="text-xl font-bold">${ytdEarned.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</p>
+                    </div>
+                    <div>
+                      <p className="text-blue-200 text-xs">Inv. Received</p>
+                      <p className="text-xl font-bold">${ytdReceived.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</p>
+                    </div>
+                    <div>
+                      <p className="text-blue-200 text-xs">Outstanding</p>
+                      <p className="text-xl font-bold">${ytdOutstanding.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</p>
+                    </div>
+                    <div>
+                      <p className="text-blue-200 text-xs">Est. Tax (25%)</p>
+                      <p className="text-xl font-bold text-amber-300">${ytdEstTax.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Overdue / due-soon notification banners */}
             {(() => {
               const today = new Date(); today.setHours(0,0,0,0);
@@ -3546,6 +3812,45 @@ ${printStyle}</style></head><body>
               );
             })()}
 
+            {/* Invoice aging report */}
+            {(() => {
+              const today = new Date(); today.setHours(0,0,0,0);
+              const unpaid = invoices.filter(i => { const s = computeInvoiceStatus(i); return s !== "Paid"; });
+              const getDue = i => { const d = new Date(i.dueDate || (() => { const x = new Date(i.date); x.setDate(x.getDate() + 30); return x.toISOString().split("T")[0]; })()); d.setHours(0,0,0,0); return d; };
+              const buckets = [
+                { label: "Current", range: [null, 0], color: "text-emerald-600 bg-emerald-50", border: "border-emerald-200" },
+                { label: "1–30 days", range: [1, 30], color: "text-amber-600 bg-amber-50", border: "border-amber-200" },
+                { label: "31–60 days", range: [31, 60], color: "text-orange-600 bg-orange-50", border: "border-orange-200" },
+                { label: "61–90 days", range: [61, 90], color: "text-red-500 bg-red-50", border: "border-red-200" },
+                { label: "90+ days", range: [91, null], color: "text-red-700 bg-red-100", border: "border-red-300" },
+              ];
+              const bucketData = buckets.map(b => {
+                const items = unpaid.filter(i => {
+                  const diff = Math.round((today - getDue(i)) / 86400000);
+                  if (b.range[0] === null) return diff <= 0;
+                  if (b.range[1] === null) return diff >= b.range[0];
+                  return diff >= b.range[0] && diff <= b.range[1];
+                });
+                const total = items.reduce((a, i) => a + Math.max(0, (parseFloat(i.amount) || 0) - (parseFloat(i.amountReceived) || 0)), 0);
+                return { ...b, count: items.length, total };
+              });
+              if (unpaid.length === 0) return null;
+              return (
+                <div className="bg-white border border-slate-200 rounded-xl p-4">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-3">Accounts Receivable Aging</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                    {bucketData.map(b => (
+                      <div key={b.label} className={`rounded-lg border p-3 ${b.border} ${b.color}`}>
+                        <p className="text-[10px] font-bold uppercase tracking-wide opacity-70">{b.label}</p>
+                        <p className="text-lg font-bold mt-0.5">${b.total.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</p>
+                        <p className="text-[10px] opacity-60">{b.count} invoice{b.count !== 1 ? "s" : ""}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Job selector for upcoming upload */}
             <div className="flex items-center gap-3 flex-wrap">
               <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Upload to job</span>
@@ -3576,6 +3881,11 @@ ${printStyle}</style></head><body>
                   ) : (
                     <Button variant="outline" onClick={() => setShowNewJobForm(true)} className="h-8 text-xs"><Plus size={13} className="mr-1" />New Job</Button>
                   )}
+                  <Button variant="outline" onClick={() => {
+                    const header = ["Invoice #", "Date", "Due Date", "Company", "Job", "Amount", "Received", "Status"];
+                    const rows = filteredInvoices.map(i => [i.invoiceNumber || "", i.date || "", i.dueDate || "", i.company || "", i.jobId ? (jobs.find(j => j.id === i.jobId)?.name || i.jobId) : "", i.amount || 0, i.amountReceived || 0, computeInvoiceStatus(i)]);
+                    downloadCSV([header, ...rows], `invoices_${selectedYear}.csv`);
+                  }} className="h-8 text-xs gap-1.5"><FileDown size={13} />CSV</Button>
                 </div>
               </div>
 
@@ -3659,6 +3969,12 @@ ${printStyle}</style></head><body>
                                           {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
                                         </select>
                                         <Button variant="danger" onClick={() => deleteInvoice(item.id)} className="!p-1.5"><Trash2 size={14} /></Button>
+                                        <button
+                                          onClick={() => duplicateInvoice(item)}
+                                          className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                                          title="Duplicate invoice with today's date &amp; new number">
+                                          <Copy size={13} />
+                                        </button>
                                       </div>
                                     </div>
                                     {item.invoiceNumber && <p className="text-[11px] text-slate-400 font-mono tracking-wide -mt-2">#{item.invoiceNumber}</p>}
@@ -3977,6 +4293,10 @@ ${printStyle}</style></head><body>
                   <Input type="number" value={newTimecard.daysOffPerDiem} onChange={e => setNewTimecard(p => ({ ...p, daysOffPerDiem: e.target.value }))} placeholder="0" />
                 </div>
                 <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Kit/Box Rental ($/day)</label>
+                  <Input type="number" value={newTimecard.kitRentalRate} onChange={e => setNewTimecard(p => ({ ...p, kitRentalRate: e.target.value }))} placeholder="0" />
+                </div>
+                <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Notes</label>
                   <Input value={newTimecard.description} onChange={e => setNewTimecard(p => ({ ...p, description: e.target.value }))} placeholder="Meal penalty, etc." />
                 </div>
@@ -4188,6 +4508,7 @@ ${printStyle}</style></head><body>
                       <td className="px-3 py-1.5 text-[10px] font-bold text-emerald-700 uppercase border-r border-slate-200 whitespace-nowrap">Daily Total</td>
                       {(() => {
                         const sixthIdx = get6thDayIndex(newTimecard.days);
+                        const seventhIdx = get7thDayIndex(newTimecard.days);
                         const rate = parseFloat(newTimecard.rate) || 0;
                         const guarH = parseFloat(newTimecard.guarHours) || 0;
                         const wPD = parseFloat(newTimecard.workPerDiem) || 0;
@@ -4195,7 +4516,7 @@ ${printStyle}</style></head><body>
                         return newTimecard.days.map((d, i) => {
                           const h = calcDayHours(d);
                           const paidH = h > 0 ? Math.max(h, guarH) : 0;
-                          const ot = i === sixthIdx ? calcOTBreakdown6thDay(paidH) : calcOTBreakdown(paidH);
+                          const ot = i === seventhIdx ? calcOTBreakdown7thDay(paidH) : i === sixthIdx ? calcOTBreakdown6thDay(paidH) : calcOTBreakdown(paidH);
                           const perDiem = (d.perDiemWork ? wPD : 0) + (d.perDiemOff ? oPD : 0);
                           const dayTotal = ot.hours1x * rate + ot.hours15x * rate * 1.5 + ot.hours2x * rate * 2 + (d.mealPenalty ? rate : 0) + perDiem;
                           const isWeekend = i === 0 || i === 6;
@@ -4213,16 +4534,19 @@ ${printStyle}</style></head><body>
                       <td className="px-3 py-2 text-[10px] font-bold text-blue-100 uppercase border-r border-blue-500">Total Hrs</td>
                       {(() => {
                         const sixthIdx = get6thDayIndex(newTimecard.days);
+                        const seventhIdx = get7thDayIndex(newTimecard.days);
                         const guarH = parseFloat(newTimecard.guarHours) || 0;
                         return newTimecard.days.map((d, i) => {
                           const h = calcDayHours(d);
                           const paidH = h > 0 ? Math.max(h, guarH) : 0;
                           const is6th = i === sixthIdx;
-                          const ot = is6th ? calcOTBreakdown6thDay(paidH) : calcOTBreakdown(paidH);
+                          const is7th = i === seventhIdx;
+                          const ot = is7th ? calcOTBreakdown7thDay(paidH) : is6th ? calcOTBreakdown6thDay(paidH) : calcOTBreakdown(paidH);
                           const isWeekend = i === 0 || i === 6;
                           return (
                             <td key={i} className={`px-1 py-2 text-center border-r border-blue-500 last:border-r-0 ${isWeekend ? "bg-blue-700" : ""}`}>
                               <div className={`font-bold text-sm ${paidH > 0 ? "text-white" : "text-blue-400"}`}>{paidH > 0 ? paidH : "—"}</div>
+                              {is7th && paidH > 0 && <div className="text-[9px] text-rose-300 font-bold">7th day</div>}
                               {is6th && paidH > 0 && <div className="text-[9px] text-cyan-300 font-bold">6th day</div>}
                               {ot.hours15x > 0 && <div className="text-[9px] text-amber-300 font-medium">{ot.hours15x}h @1.5×</div>}
                               {ot.hours2x > 0 && <div className="text-[9px] text-red-300 font-medium">{ot.hours2x}h @2×</div>}
@@ -4283,6 +4607,11 @@ ${printStyle}</style></head><body>
                   ) : (
                     <Button variant="outline" onClick={() => setShowNewJobForm(true)} className="h-8 text-xs"><Plus size={13} className="mr-1" />New Job</Button>
                   )}
+                  <Button variant="outline" onClick={() => {
+                    const header = ["Week Ending", "Company", "Job Name", "Classification", "Rate/hr", "Day Rate", "Hours", "Total", "Meal Penalty Pay", "Per Diem Total", "Kit Rental Pay", "Mileage", "Status"];
+                    const rows = filteredTimecards.map(tc => [tc.date || "", tc.company || "", tc.jobName || "", tc.jobClassification || "", tc.rate || 0, tc.dayRate || 0, tc.hours || 0, tc.total || 0, tc.mealPenaltyPay || 0, tc.perDiemTotal || 0, tc.kitRentalPay || 0, tc.mileage || 0, tc.status || ""]);
+                    downloadCSV([header, ...rows], `timecards_${selectedYear}.csv`);
+                  }} className="h-8 text-xs gap-1.5"><FileDown size={13} />CSV</Button>
                 </div>
               </div>
 
@@ -4366,6 +4695,22 @@ ${printStyle}</style></head><body>
                                         {entry.guarHours > 0 && <span>Guar. <span className="font-semibold text-slate-600">{entry.guarHours}h</span></span>}
                                         {entry.rate > 0 && <span>${entry.rate}/hr</span>}
                                       </div>
+                                      {/* Turnaround / meal penalty warnings */}
+                                      {(() => {
+                                        const turnaroundViolations = entry.days ? calcTurnaroundViolations(entry.days) : new Set();
+                                        const autoMealDays = entry.days ? entry.days.filter(d => !d.mealPenalty && shouldAutoMealPenalty(d)) : [];
+                                        if (turnaroundViolations.size === 0 && autoMealDays.length === 0) return null;
+                                        return (
+                                          <div className="flex flex-wrap gap-1.5 mt-1">
+                                            {turnaroundViolations.size > 0 && (
+                                              <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold" title="< 10h between wrap and next call">⏰ {turnaroundViolations.size} turnaround violation{turnaroundViolations.size !== 1 ? "s" : ""}</span>
+                                            )}
+                                            {autoMealDays.length > 0 && (
+                                              <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold" title="No meal break logged within 6h of call">🍽 {autoMealDays.length} possible meal penalty</span>
+                                            )}
+                                          </div>
+                                        );
+                                      })()}
                                     </div>
                                     {/* 7-day calendar */}
                                     {entry.days?.length > 0 ? (
@@ -4425,7 +4770,15 @@ ${printStyle}</style></head><body>
                                                 <td className="px-1.5 py-1.5 text-center">—</td>
                                               </tr>
                                             )}
-                                            {(entry.mealPenaltyPay || 0) > 0 && (
+                                            {(entry.kitRentalPay || 0) > 0 && (
+                                              <tr className="bg-purple-600 text-white text-[11px] font-bold">
+                                                <td colSpan={3} className="px-2 py-1.5 border-r border-purple-500">Kit/Box Rental ({entry.days.filter(d => d.totalHours > 0 || d.call).length}d × ${(entry.kitRentalRate || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}/day)</td>
+                                                <td className="px-1.5 py-1.5 text-center border-r border-purple-500">—</td>
+                                                <td className="px-1.5 py-1.5 text-center border-r border-purple-500">${(entry.kitRentalPay).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                                                <td className="px-1.5 py-1.5 text-center">—</td>
+                                              </tr>
+                                            )}
+                                            {((entry.mealPenaltyPay || 0) > 0 || (entry.kitRentalPay || 0) > 0) && (
                                               <tr className="bg-blue-800 text-white text-[11px] font-bold">
                                                 <td colSpan={3} className="px-2 py-1.5 border-r border-blue-700">Total Due</td>
                                                 <td className="px-1.5 py-1.5 text-center border-r border-blue-700">—</td>
@@ -5083,6 +5436,24 @@ ${printStyle}</style></head><body>
             });
           });
 
+          // Standalone hold days
+          holdDays.forEach(hd => {
+            const released = new Set(hd.releasedDates || []);
+            const dates = hd.dates || [];
+            if (hd.startDate && !hd.dates) {
+              const start = new Date(hd.startDate + "T12:00");
+              const end = hd.endDate ? new Date(hd.endDate + "T12:00") : start;
+              for (let dt = new Date(start); dt <= end; dt.setDate(dt.getDate() + 1)) {
+                const iso = dt.toISOString().split("T")[0];
+                if (!released.has(iso)) addEv(iso, { kind: "hold", holdType: hd.type || "hold", label: hd.company || "Hold Day", holdId: hd.id, holdDate: iso });
+              }
+            } else {
+              dates.forEach(iso => {
+                if (!released.has(iso)) addEv(iso, { kind: "hold", holdType: hd.type || "hold", label: hd.company || "Hold Day", holdId: hd.id, holdDate: iso });
+              });
+            }
+          });
+
           invoices.forEach(inv => {
             if (inv.dueDate) {
               const s = computeInvoiceStatus(inv);
@@ -5105,9 +5476,16 @@ ${printStyle}</style></head><body>
 
           const prevMonth = () => { const dt = new Date(calYear, calMonth - 1, 1); setCalMonth(dt.getMonth()); setCalYear(dt.getFullYear()); };
           const nextMonth = () => { const dt = new Date(calYear, calMonth + 1, 1); setCalMonth(dt.getMonth()); setCalYear(dt.getFullYear()); };
+          const selSet = new Set(calSelectedDates);
+          const toggleDate = iso => setCalSelectedDates(prev => prev.includes(iso) ? prev.filter(d => d !== iso) : [...prev, iso]);
 
           const kindStyle = { shoot: "bg-blue-100 text-blue-800", hold: "bg-amber-100 text-amber-800", travel: "bg-purple-100 text-purple-800", "inv-due": "bg-orange-100 text-orange-800", "inv-overdue": "bg-red-100 text-red-800", "inv-paid": "bg-emerald-100 text-emerald-700" };
           const kindDot = { shoot: "🎬", hold: "⏸", travel: "✈", "inv-due": "💰", "inv-overdue": "⚠", "inv-paid": "✓" };
+          const holdTypeStyle = { soft: "bg-pink-100 text-pink-700", hold: "bg-blue-100 text-blue-800", locked: "bg-orange-100 text-orange-800", travel: "bg-purple-100 text-purple-800" };
+          const holdTypeDot = { soft: "✏️", hold: "⏸", locked: "🔒", travel: "✈️" };
+          const holdTypeLabel = { soft: "Soft Hold", hold: "Hold", locked: "Locked", travel: "Travel" };
+          const getChipStyle = ev => ev.holdType ? (holdTypeStyle[ev.holdType] || kindStyle.hold) : kindStyle[ev.kind];
+          const getChipDot = ev => ev.holdType ? (holdTypeDot[ev.holdType] || kindDot.hold) : kindDot[ev.kind];
 
           return (
             <div className="space-y-4">
@@ -5118,8 +5496,39 @@ ${printStyle}</style></head><body>
                   <h2 className="text-xl font-bold text-slate-800">{MONTH_NAMES[calMonth]} {calYear}</h2>
                   <button onClick={() => { setCalMonth(new Date().getMonth()); setCalYear(new Date().getFullYear()); }} className="text-[10px] text-blue-500 hover:underline mt-0.5">Today</button>
                 </div>
-                <button onClick={nextMonth} className="p-2 rounded-lg hover:bg-slate-100 transition-colors text-slate-600"><ChevronRight size={18} /></button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => { setCalSelectMode(m => !m); setCalSelectedDates([]); }}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors shadow-sm ${calSelectMode ? "bg-amber-500 text-white ring-2 ring-amber-300" : "bg-amber-100 text-amber-800 hover:bg-amber-200"}`}
+                  >
+                    <span className="text-sm leading-none">⏸</span> {calSelectMode ? "Selecting…" : "Hold Days"}
+                  </button>
+                  <button onClick={nextMonth} className="p-2 rounded-lg hover:bg-slate-100 transition-colors text-slate-600"><ChevronRight size={18} /></button>
+                </div>
               </div>
+
+              {/* Select-mode action bar */}
+              {calSelectMode && (
+                <div className="flex items-center justify-between bg-amber-50 border border-amber-300 rounded-xl px-4 py-3 shadow-sm">
+                  <p className="text-sm text-amber-800">
+                    {calSelectedDates.length === 0
+                      ? <span className="font-medium">Tap days on the calendar to select them for a hold</span>
+                      : <span className="font-bold">{calSelectedDates.length} day{calSelectedDates.length !== 1 ? "s" : ""} selected</span>}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    {calSelectedDates.length > 0 && (
+                      <button
+                        onClick={() => { setHoldNameInput(""); setHoldTypeInput("hold"); setHoldNamePrompt(true); }}
+                        className="px-3 py-1.5 text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition-colors"
+                      >Apply Hold</button>
+                    )}
+                    <button
+                      onClick={() => { setCalSelectMode(false); setCalSelectedDates([]); }}
+                      className="px-3 py-1.5 text-xs font-semibold border border-amber-300 text-amber-700 hover:bg-amber-100 rounded-lg transition-colors"
+                    >Cancel</button>
+                  </div>
+                </div>
+              )}
 
               {/* Day-of-week headers */}
               <div className="grid grid-cols-7 gap-1 px-0.5">
@@ -5130,30 +5539,80 @@ ${printStyle}</style></head><body>
 
               {/* Calendar grid */}
               <div className="grid grid-cols-7 gap-1">
-                {cells.map((cell, ci) => (
-                  <div key={ci} className={`min-h-[88px] rounded-xl border p-1.5 flex flex-col ${ cell === null ? "bg-transparent border-transparent" : cell.iso === today ? "border-blue-400 bg-blue-50 shadow-sm" : "border-slate-200 bg-white hover:border-blue-200 transition-colors" }`}>
-                    {cell && (
-                      <>
-                        <div className={`text-xs font-bold mb-1 self-start w-6 h-6 flex items-center justify-center rounded-full ${cell.iso === today ? "bg-blue-600 text-white" : "text-slate-600"}`}>{cell.d}</div>
-                        <div className="space-y-0.5 flex-1">
-                          {cell.evs.slice(0, 3).map((ev, ei) => (
-                            <div key={ei} className={`text-[9px] px-1 py-0.5 rounded truncate font-medium leading-tight ${kindStyle[ev.kind] || "bg-slate-100 text-slate-700"}`} title={ev.label + (ev.hours ? ` (${ev.hours}h)` : "") + (ev.amount ? ` · $${(parseFloat(ev.amount)||0).toLocaleString()}` : "")}>
-                              {kindDot[ev.kind]} {ev.label}
-                            </div>
-                          ))}
-                          {cell.evs.length > 3 && <div className="text-[9px] text-slate-400 font-medium pl-1">+{cell.evs.length - 3} more</div>}
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ))}
+                {cells.map((cell, ci) => {
+                  const isSelected = cell && selSet.has(cell.iso);
+                  return (
+                    <div
+                      key={ci}
+                      onClick={() => calSelectMode && cell && toggleDate(cell.iso)}
+                      className={`min-h-[88px] rounded-xl border p-1.5 flex flex-col transition-colors ${
+                        cell === null ? "bg-transparent border-transparent" :
+                        isSelected ? "border-amber-500 bg-amber-50 ring-2 ring-amber-400 cursor-pointer" :
+                        calSelectMode ? "border-slate-200 bg-white hover:bg-amber-50 hover:border-amber-300 cursor-pointer" :
+                        cell.iso === today ? "border-blue-400 bg-blue-50 shadow-sm" :
+                        "border-slate-200 bg-white hover:border-blue-200"
+                      }`}
+                    >
+                      {cell && (
+                        <>
+                          <div className={`text-xs font-bold mb-1 self-start w-6 h-6 flex items-center justify-center rounded-full ${
+                            isSelected ? "bg-amber-500 text-white" :
+                            cell.iso === today ? "bg-blue-600 text-white" : "text-slate-600"
+                          }`}>{cell.d}</div>
+                          <div className="space-y-0.5 flex-1">
+                            {cell.evs.slice(0, 3).map((ev, ei) => (
+                              <div key={ei} className={`text-[9px] px-1 py-0.5 rounded truncate font-medium leading-tight flex items-center gap-0.5 ${getChipStyle(ev)}`} title={ev.label + (ev.hours ? ` (${ev.hours}h)` : "") + (ev.amount ? ` · $${(parseFloat(ev.amount)||0).toLocaleString()}` : "")}>
+                                <span className="truncate flex-1">{getChipDot(ev)} {ev.label}</span>
+                                {ev.holdId && !calSelectMode && <button onClick={e => { e.stopPropagation(); setHoldReleaseModal({ holdId: ev.holdId, date: cell.iso }); }} className="shrink-0 opacity-60 hover:opacity-100 ml-0.5 leading-none" title="Release options">&times;</button>}
+                              </div>
+                            ))}
+                            {cell.evs.length > 3 && <div className="text-[9px] text-slate-400 font-medium pl-1">+{cell.evs.length - 3} more</div>}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
+
+              {/* Week summary bar */}
+              {(() => {
+                const weekRows = [];
+                for (let i = 0; i < cells.length; i += 7) {
+                  const weekCells = cells.slice(i, i + 7).filter(Boolean);
+                  if (weekCells.length === 0) continue;
+                  const shootDays = weekCells.filter(c => c.evs.some(e => e.kind === "shoot")).length;
+                  const holdDayCount = weekCells.filter(c => c.evs.some(e => e.kind === "hold")).length;
+                  const travelDays = weekCells.filter(c => c.evs.some(e => e.kind === "travel")).length;
+                  const invDue = weekCells.filter(c => c.evs.some(e => e.kind === "inv-due" || e.kind === "inv-overdue")).length;
+                  if (shootDays + holdDayCount + travelDays + invDue === 0) continue;
+                  const weekLabel = new Date(weekCells[0].iso + "T12:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
+                  weekRows.push(
+                    <div key={weekCells[0].iso} className="flex items-center gap-2 text-[11px]">
+                      <span className="text-slate-400 font-mono w-16 shrink-0">{weekLabel}</span>
+                      {shootDays > 0 && <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 font-medium">🎬 {shootDays} shoot</span>}
+                      {holdDayCount > 0 && <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">⏸ {holdDayCount} hold</span>}
+                      {travelDays > 0 && <span className="px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 font-medium">✈️ {travelDays} travel</span>}
+                      {invDue > 0 && <span className="px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 font-medium">💰 {invDue} inv</span>}
+                    </div>
+                  );
+                }
+                if (weekRows.length === 0) return null;
+                return (
+                  <div className="bg-white border border-slate-200 rounded-xl px-4 py-3 space-y-1.5">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Week Summary</p>
+                    {weekRows}
+                  </div>
+                );
+              })()}
 
               {/* Legend */}
               <div className="flex flex-wrap items-center gap-2 pt-1">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Legend</span>
-                {[{ kind: "shoot", label: "Shoot Day" }, { kind: "hold", label: "Hold Day" }, { kind: "travel", label: "Travel" }, { kind: "inv-due", label: "Payment Due" }, { kind: "inv-overdue", label: "Overdue" }, { kind: "inv-paid", label: "Inv. Paid" }].map(({ kind, label }) => (
+                {[{ kind: "shoot", label: "Shoot Day" }, { kind: "inv-due", label: "Payment Due" }, { kind: "inv-overdue", label: "Overdue" }, { kind: "inv-paid", label: "Inv. Paid" }].map(({ kind, label }) => (
                   <span key={kind} className={`text-[10px] px-2.5 py-1 rounded-full font-medium ${kindStyle[kind]}`}>{kindDot[kind]} {label}</span>
+                ))}
+                {["soft", "hold", "locked", "travel"].map(t => (
+                  <span key={t} className={`text-[10px] px-2.5 py-1 rounded-full font-medium ${holdTypeStyle[t]}`}>{holdTypeDot[t]} {holdTypeLabel[t]}</span>
                 ))}
               </div>
 
@@ -5172,9 +5631,10 @@ ${printStyle}</style></head><body>
                       {upcoming.map((ev, i) => (
                         <div key={i} className="flex items-center gap-3">
                           <span className="text-xs font-mono text-slate-500 w-24 shrink-0">{new Date(ev.date + "T12:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>
-                          <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${kindStyle[ev.kind]}`}>{kindDot[ev.kind]} {ev.kind === "shoot" ? "Shoot" : ev.kind === "hold" ? "Hold" : ev.kind === "travel" ? "Travel" : "Invoice"}</span>
+                          <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${getChipStyle(ev)}`}>{getChipDot(ev)} {ev.kind === "shoot" ? "Shoot" : ev.holdType ? holdTypeLabel[ev.holdType] : ev.kind === "travel" ? "Travel" : "Invoice"}</span>
                           <span className="text-sm text-slate-700 truncate">{ev.label}</span>
                           {ev.amount && <span className="text-xs font-semibold text-slate-500 ml-auto shrink-0">${(parseFloat(ev.amount)||0).toLocaleString(undefined,{minimumFractionDigits:2})}</span>}
+                          {ev.holdId && <button onClick={() => setHoldReleaseModal({ holdId: ev.holdId, date: ev.date })} className="ml-auto text-slate-300 hover:text-amber-500 text-sm leading-none shrink-0" title="Release options">&times;</button>}
                         </div>
                       ))}
                     </div>
