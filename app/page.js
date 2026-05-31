@@ -699,6 +699,7 @@ export default function App() {
   const [markPaidMode, setMarkPaidMode] = useState(null); // "full" | "partial" | null
   const [markPaidDate, setMarkPaidDate] = useState("");
   const [markPaidMethod, setMarkPaidMethod] = useState("");
+  const [editingInvoiceId, setEditingInvoiceId] = useState(null); // id of invoice being edited (null = create new)
   const [driveCheckStatus, setDriveCheckStatus] = useState("idle"); // idle | checking | ok | error
   const [driveCheckError, setDriveCheckError] = useState("");
   const relinkInputRef = useRef(null);
@@ -1879,7 +1880,7 @@ ${printStyle}</style></head><body>
       jobName: "",
       jobId: "",
       lineItems: [{ id: crypto.randomUUID(), description: "", qty: "1", rate: "", amount: 0 }],
-      paymentMethod: profile.paymentMethod || "ACH",
+      paymentMethods: profile.paymentMethods || (profile.paymentMethod ? [profile.paymentMethod] : ["ACH"]),
       bankName: profile.bankName || "",
       routingNumber: profile.routingNumber || "",
       accountNumber: profile.accountNumber || "",
@@ -1891,6 +1892,7 @@ ${printStyle}</style></head><body>
       taxRate: "",
       logoDataUrl: profile.logoDataUrl || "",
     });
+    setEditingInvoiceId(null);
     setShowInvoiceGenerator(true);
   };
 
@@ -1905,7 +1907,20 @@ ${printStyle}</style></head><body>
       invoiceDate: today,
       dueDate: dueD.toISOString().split("T")[0],
       lineItems: (source.lineItems || []).map(li => ({ ...li, id: crypto.randomUUID() })),
+      paymentMethods: source.paymentMethods || (source.paymentMethod ? [source.paymentMethod] : ["ACH"]),
     });
+    setEditingInvoiceId(null);
+    setShowInvoiceGenerator(true);
+  };
+
+  const openEditInvoice = (item) => {
+    const data = item.generatedData || {};
+    setInvoiceForm({
+      ...data,
+      paymentMethods: data.paymentMethods || (data.paymentMethod ? [data.paymentMethod] : ["ACH"]),
+      lineItems: (data.lineItems || []).map(li => ({ ...li, id: crypto.randomUUID() })),
+    });
+    setEditingInvoiceId(item.id);
     setShowInvoiceGenerator(true);
   };
 
@@ -1977,7 +1992,9 @@ ${printStyle}</style></head><body>
     .tr-row.grand { background: #cff4fc; font-weight: bold; font-size: 13px; border-bottom: none; }
     .payment-block { border: 1px solid #9ee7f5; border-top: none; }
     .payment-hdr { background: #cff4fc; padding: 4px 12px; font-size: 8.5px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #9ee7f5; }
-    .payment-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; padding: 10px 12px; }
+    .payment-grid { display: grid; gap: 0; padding: 0; }
+    .pm-row { display: flex; gap: 4px; margin-bottom: 2px; }
+    .pm-row .lbl { width: 52px; shrink: 0; }
     .footer-bar { border: 1px solid #9ee7f5; border-top: none; text-align: center; padding: 7px; font-size: 10px; color: #666; background: #f8fefe; }
     @media print { body { padding: 10px; } }
   </style>
@@ -2035,26 +2052,29 @@ ${printStyle}</style></head><body>
   </div>
 </div>
 <div class="payment-block">
-  <div class="payment-hdr">Payment Method: ${form.paymentMethod || "ACH"}</div>
-  <div class="payment-grid">
-    ${form.paymentMethod === "ACH" || !form.paymentMethod ? `
-      <div><div class="lbl">Bank Name</div><div class="val">${form.bankName || "\u2014"}</div></div>
-      <div><div class="lbl">Routing Number</div><div class="val" style="font-family:monospace;">${form.routingNumber || "\u2014"}</div></div>
-      <div><div class="lbl">Account Number</div><div class="val" style="font-family:monospace;">${form.accountNumber || "\u2014"}</div></div>` : ""}
-    ${form.paymentMethod === "PayPal" ? `<div style="grid-column:1/-1"><div class="lbl">PayPal Email / Username</div><div class="val">${form.paypalHandle || "\u2014"}</div></div>` : ""}
-    ${form.paymentMethod === "Zelle" ? `<div style="grid-column:1/-1"><div class="lbl">Zelle Phone / Email</div><div class="val">${form.zelleHandle || "\u2014"}</div></div>` : ""}
-    ${form.paymentMethod === "Venmo" ? `<div style="grid-column:1/-1"><div class="lbl">Venmo Username</div><div class="val">${form.venmoHandle || "\u2014"}</div></div>` : ""}
-    ${form.paymentMethod === "Check" ? `<div style="grid-column:1/-1"><div class="lbl">Make Check Payable To</div><div class="val" style="font-weight:600;">${form.checkPayableTo || "\u2014"}</div></div>` : ""}
+  <div class="payment-hdr">How to Pay</div>
+  <div class="payment-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));">
+    ${(() => {
+      const methods = Array.isArray(form.paymentMethods) ? form.paymentMethods : (form.paymentMethod ? [form.paymentMethod] : ["ACH"]);
+      return methods.map(m => {
+        if (m === "ACH") return `<div style="padding:8px 12px;"><div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">ACH / Wire Transfer</div><div class="pm-row"><div class="lbl">Bank</div><div class="val">${form.bankName || "\u2014"}</div></div><div class="pm-row"><div class="lbl">Routing</div><div class="val" style="font-family:monospace;">${form.routingNumber || "\u2014"}</div></div><div class="pm-row"><div class="lbl">Account</div><div class="val" style="font-family:monospace;">${form.accountNumber || "\u2014"}</div></div></div>`;
+        if (m === "Check") return `<div style="padding:8px 12px;"><div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">Check</div><div class="pm-row"><div class="lbl">Payable To</div><div class="val" style="font-weight:600;">${form.checkPayableTo || "\u2014"}</div></div></div>`;
+        if (m === "PayPal") return `<div style="padding:8px 12px;"><div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">PayPal</div><div class="pm-row"><div class="lbl">Email / Username</div><div class="val">${form.paypalHandle || "\u2014"}</div></div></div>`;
+        if (m === "Zelle") return `<div style="padding:8px 12px;"><div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">Zelle</div><div class="pm-row"><div class="lbl">Phone / Email</div><div class="val">${form.zelleHandle || "\u2014"}</div></div></div>`;
+        if (m === "Venmo") return `<div style="padding:8px 12px;"><div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">Venmo</div><div class="pm-row"><div class="lbl">Username</div><div class="val">${form.venmoHandle || "\u2014"}</div></div></div>`;
+        return "";
+      }).join('<div style="border-left:1px solid #9ee7f5;"></div>');
+    })()}
   </div>
 </div>
 <div class="footer-bar">Thank you for your business!</div>
 </body></html>`;
 
     // Persist sender profile for next time
-    try { localStorage.setItem("hibp_sender_profile", JSON.stringify({ senderName: form.senderName, senderAddress: form.senderAddress, senderCity: form.senderCity, senderState: form.senderState, senderZip: form.senderZip, senderPhone: form.senderPhone, senderEmail: form.senderEmail, paymentMethod: form.paymentMethod, bankName: form.bankName, routingNumber: form.routingNumber, accountNumber: form.accountNumber, paypalHandle: form.paypalHandle, zelleHandle: form.zelleHandle, venmoHandle: form.venmoHandle, checkPayableTo: form.checkPayableTo, logoDataUrl: form.logoDataUrl || "" })); } catch {}
+    try { localStorage.setItem("hibp_sender_profile", JSON.stringify({ senderName: form.senderName, senderAddress: form.senderAddress, senderCity: form.senderCity, senderState: form.senderState, senderZip: form.senderZip, senderPhone: form.senderPhone, senderEmail: form.senderEmail, paymentMethods: form.paymentMethods, paymentMethod: (form.paymentMethods || [])[0] || "ACH", bankName: form.bankName, routingNumber: form.routingNumber, accountNumber: form.accountNumber, paypalHandle: form.paypalHandle, zelleHandle: form.zelleHandle, venmoHandle: form.venmoHandle, checkPayableTo: form.checkPayableTo, logoDataUrl: form.logoDataUrl || "" })); } catch {}
 
     if (saveEntry) {
-      const invId = crypto.randomUUID();
+      const invId = editingInvoiceId || crypto.randomUUID();
       const safeNum = (form.invoiceNumber || invId.slice(0, 8)).replace(/[^a-zA-Z0-9_\-]/g, "_");
       const htmlFileName = `invoice_${safeNum}.html`;
       let savedFileName = null;
@@ -2067,18 +2087,40 @@ ${printStyle}</style></head><body>
         const res = await fetch("/api/files", { method: "POST", body: fd });
         if (res.ok) savedFileName = htmlFileName;
       } catch (err) { console.warn("Invoice file save error:", err.message); }
-      setInvoices(prev => [{
-        id: invId, fileId: null, fileName: savedFileName, fileType: savedFileName ? "text/html" : null,
-        company: form.clientName || "", amount: total, date: form.invoiceDate,
-        invoiceNumber: form.invoiceNumber || "", status: "Unpaid",
-        jobId: form.jobId || "", dueDate: form.dueDate,
-        paymentTerms: form.paymentTerms || "Net 30",
-        lateFeeType: form.lateFeeType || "none",
-        lateFeeRate: parseFloat(form.lateFeeRate) || 0,
-        amountReceived: 0,
-        generated: true, generatedData: form, timestamp: Date.now(),
-      }, ...prev]);
-      if (form.jobId) setExpandedJobs(prev => { const n = new Set(prev); n.add(form.jobId); return n; });
+
+      if (editingInvoiceId) {
+        // Update existing invoice record, preserve payments/status
+        setInvoices(prev => prev.map(inv => inv.id === editingInvoiceId ? {
+          ...inv,
+          company: form.clientName || "",
+          amount: total,
+          date: form.invoiceDate,
+          invoiceNumber: form.invoiceNumber || "",
+          dueDate: form.dueDate,
+          paymentTerms: form.paymentTerms || "Net 30",
+          lateFeeType: form.lateFeeType || "none",
+          lateFeeRate: parseFloat(form.lateFeeRate) || 0,
+          jobId: form.jobId || inv.jobId || "",
+          fileName: savedFileName || inv.fileName,
+          fileType: savedFileName ? "text/html" : inv.fileType,
+          generatedData: form,
+          timestamp: Date.now(),
+        } : inv));
+        setEditingInvoiceId(null);
+      } else {
+        setInvoices(prev => [{
+          id: invId, fileId: null, fileName: savedFileName, fileType: savedFileName ? "text/html" : null,
+          company: form.clientName || "", amount: total, date: form.invoiceDate,
+          invoiceNumber: form.invoiceNumber || "", status: "Unpaid",
+          jobId: form.jobId || "", dueDate: form.dueDate,
+          paymentTerms: form.paymentTerms || "Net 30",
+          lateFeeType: form.lateFeeType || "none",
+          lateFeeRate: parseFloat(form.lateFeeRate) || 0,
+          amountReceived: 0,
+          generated: true, generatedData: form, timestamp: Date.now(),
+        }, ...prev]);
+        if (form.jobId) setExpandedJobs(prev => { const n = new Set(prev); n.add(form.jobId); return n; });
+      }
     }
 
     const w = window.open("", "_blank");
@@ -3023,7 +3065,7 @@ ${printStyle}</style></head><body>
                   const taxAmt = subtotal * ((parseFloat(f.taxRate) || 0) / 100);
                   const total = subtotal + taxAmt;
                   const rows = f.lineItems.map(li => `<tr><td style="padding:9px 12px;border-bottom:1px solid #daf2f7;">${li.description || ""}</td><td style="padding:9px 12px;text-align:center;border-bottom:1px solid #daf2f7;">${li.qty || ""}</td><td style="padding:9px 12px;text-align:right;border-bottom:1px solid #daf2f7;">${li.rate ? "$" + fmt(li.rate) : ""}</td><td style="padding:9px 12px;text-align:right;border-bottom:1px solid #daf2f7;font-weight:600;">${(parseFloat(li.amount) || 0) > 0 ? "$" + fmt(li.amount) : ""}</td></tr>`).join("");
-                  const srcDoc = `<!DOCTYPE html><html><head><meta charset="utf-8"/><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:'Century Gothic','Trebuchet MS',Arial,sans-serif;font-size:11px;color:#111;background:#fff;padding:36px 40px;}.top-bar{background:#111;height:8px;border-radius:2px 2px 0 0;}.header{display:grid;grid-template-columns:1fr auto;border:1px solid #9ee7f5;border-top:none;}.sender-block{background:#cff4fc;padding:16px 18px;}.invoice-block{padding:16px 18px;text-align:right;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;border-left:1px solid #9ee7f5;min-width:160px;background:#fff;}.invoice-title{font-size:24px;font-weight:bold;letter-spacing:3px;}.lbl{font-size:8.5px;color:#555;text-transform:uppercase;letter-spacing:0.4px;margin-bottom:1px;}.val{font-size:11px;color:#111;line-height:1.4;}.sec-hdr{background:#cff4fc;border:1px solid #9ee7f5;border-top:none;display:grid;grid-template-columns:1fr 1fr;}.sec-hdr-cell{padding:4px 12px;font-size:8.5px;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;}.sec-hdr-cell:first-child{border-right:1px solid #9ee7f5;}.cj-grid{display:grid;grid-template-columns:1fr 1fr;border:1px solid #9ee7f5;border-top:none;}.cj-col{padding:10px 12px;}.cj-col:first-child{border-right:1px solid #9ee7f5;}table.items{width:100%;border-collapse:collapse;border:1px solid #9ee7f5;border-top:none;}table.items thead th{background:#cff4fc;padding:6px 12px;font-size:8.5px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #9ee7f5;font-weight:bold;}table.items thead th:not(:first-child){text-align:right;}table.items thead th:nth-child(2){text-align:center;width:80px;}table.items thead th:nth-child(3){width:110px;}table.items thead th:nth-child(4){width:110px;}.totals-grid{display:grid;grid-template-columns:1fr 220px;border:1px solid #9ee7f5;border-top:none;}.notes-cell{padding:10px 12px;font-size:10px;color:#555;border-right:1px solid #9ee7f5;}.tr-row{display:flex;justify-content:space-between;padding:5px 12px;border-bottom:1px solid #e8f9fc;font-size:11px;}.tr-row.grand{background:#cff4fc;font-weight:bold;font-size:13px;border-bottom:none;}.payment-block{border:1px solid #9ee7f5;border-top:none;}.payment-hdr{background:#cff4fc;padding:4px 12px;font-size:8.5px;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #9ee7f5;}.payment-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:10px 12px;}.footer-bar{border:1px solid #9ee7f5;border-top:none;text-align:center;padding:7px;font-size:10px;color:#666;background:#f8fefe;}</style></head><body><div class="top-bar"></div><div class="header"><div class="sender-block">${f.logoDataUrl?`<img src="${f.logoDataUrl}" style="max-height:60px;max-width:180px;object-fit:contain;margin-bottom:10px;display:block;" alt=""/>`:""}<div class="lbl">Name</div><div class="val" style="font-weight:600;">${f.senderName||""}</div>${f.senderAddress?`<div class="lbl" style="margin-top:6px;">Address</div><div class="val">${f.senderAddress}</div>`:""}<div class="val">${[f.senderCity,f.senderState,f.senderZip].filter(Boolean).join(", ")}</div></div><div class="invoice-block"><div class="invoice-title">INVOICE</div><div class="lbl" style="margin-top:6px;">Invoice #</div><div class="val" style="font-family:monospace;">${f.invoiceNumber||""}</div><div class="lbl" style="margin-top:4px;">Date</div><div class="val">${fmtDate(f.invoiceDate)}</div>${f.dueDate?`<div class="lbl" style="margin-top:4px;">Due</div><div class="val">${fmtDate(f.dueDate)}</div>`:""}</div></div><div class="sec-hdr"><div class="sec-hdr-cell">Bill To</div><div class="sec-hdr-cell">Job / Project</div></div><div class="cj-grid"><div class="cj-col"><div class="val" style="font-weight:600;">${f.clientName||""}</div>${f.clientAddress?`<div class="val">${f.clientAddress}</div>`:""}<div class="val">${[f.clientCity,f.clientState,f.clientZip].filter(Boolean).join(", ")}</div>${f.clientEmail?`<div class="val">${f.clientEmail}</div>`:""}</div><div class="cj-col"><div class="val" style="font-weight:600;">${f.jobName||""}</div>${f.jobDescription?`<div class="val" style="color:#555;margin-top:3px;">${f.jobDescription}</div>`:""}</div></div><table class="items"><thead><tr><th style="text-align:left;">Description</th><th>Qty / Hrs</th><th>Rate</th><th>Amount</th></tr></thead><tbody>${rows}</tbody></table><div class="totals-grid"><div class="notes-cell">${f.notes?`<strong>Notes:</strong><br/>${f.notes}`:`<span style="color:#ccc;">Notes / Comments</span>`}</div><div><div class="tr-row"><span>Subtotal</span><span>$${fmt(subtotal)}</span></div>${taxAmt>0?`<div class="tr-row"><span>Tax (${f.taxRate}%)</span><span>$${fmt(taxAmt)}</span></div>`:""}<div class="tr-row grand"><span>TOTAL</span><span>$${fmt(total)}</span></div></div></div><div class="payment-block"><div class="payment-hdr">Payment Method: ${f.paymentMethod||"ACH"}</div><div class="payment-grid">${f.paymentMethod==="ACH"||!f.paymentMethod?`<div><div class="lbl">Bank Name</div><div class="val">${f.bankName||"—"}</div></div><div><div class="lbl">Routing</div><div class="val" style="font-family:monospace;">${f.routingNumber||"—"}</div></div><div><div class="lbl">Account</div><div class="val" style="font-family:monospace;">${f.accountNumber||"—"}</div></div>`:""}${f.paymentMethod==="Check"?`<div style="grid-column:1/-1"><div class="lbl">Make Check Payable To</div><div class="val" style="font-weight:600;">${f.checkPayableTo||"—"}</div></div>`:""}</div></div><div class="footer-bar">Thank you for your business!</div></body></html>`;
+                  const srcDoc = `<!DOCTYPE html><html><head><meta charset="utf-8"/><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:'Century Gothic','Trebuchet MS',Arial,sans-serif;font-size:11px;color:#111;background:#fff;padding:36px 40px;}.top-bar{background:#111;height:8px;border-radius:2px 2px 0 0;}.header{display:grid;grid-template-columns:1fr auto;border:1px solid #9ee7f5;border-top:none;}.sender-block{background:#cff4fc;padding:16px 18px;}.invoice-block{padding:16px 18px;text-align:right;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;border-left:1px solid #9ee7f5;min-width:160px;background:#fff;}.invoice-title{font-size:24px;font-weight:bold;letter-spacing:3px;}.lbl{font-size:8.5px;color:#555;text-transform:uppercase;letter-spacing:0.4px;margin-bottom:1px;}.val{font-size:11px;color:#111;line-height:1.4;}.sec-hdr{background:#cff4fc;border:1px solid #9ee7f5;border-top:none;display:grid;grid-template-columns:1fr 1fr;}.sec-hdr-cell{padding:4px 12px;font-size:8.5px;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;}.sec-hdr-cell:first-child{border-right:1px solid #9ee7f5;}.cj-grid{display:grid;grid-template-columns:1fr 1fr;border:1px solid #9ee7f5;border-top:none;}.cj-col{padding:10px 12px;}.cj-col:first-child{border-right:1px solid #9ee7f5;}table.items{width:100%;border-collapse:collapse;border:1px solid #9ee7f5;border-top:none;}table.items thead th{background:#cff4fc;padding:6px 12px;font-size:8.5px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #9ee7f5;font-weight:bold;}table.items thead th:not(:first-child){text-align:right;}table.items thead th:nth-child(2){text-align:center;width:80px;}table.items thead th:nth-child(3){width:110px;}table.items thead th:nth-child(4){width:110px;}.totals-grid{display:grid;grid-template-columns:1fr 220px;border:1px solid #9ee7f5;border-top:none;}.notes-cell{padding:10px 12px;font-size:10px;color:#555;border-right:1px solid #9ee7f5;}.tr-row{display:flex;justify-content:space-between;padding:5px 12px;border-bottom:1px solid #e8f9fc;font-size:11px;}.tr-row.grand{background:#cff4fc;font-weight:bold;font-size:13px;border-bottom:none;}.payment-block{border:1px solid #9ee7f5;border-top:none;}.payment-hdr{background:#cff4fc;padding:4px 12px;font-size:8.5px;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #9ee7f5;}.payment-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:10px 12px;}.footer-bar{border:1px solid #9ee7f5;border-top:none;text-align:center;padding:7px;font-size:10px;color:#666;background:#f8fefe;}</style></head><body><div class="top-bar"></div><div class="header"><div class="sender-block">${f.logoDataUrl?`<img src="${f.logoDataUrl}" style="max-height:60px;max-width:180px;object-fit:contain;margin-bottom:10px;display:block;" alt=""/>`:""}<div class="lbl">Name</div><div class="val" style="font-weight:600;">${f.senderName||""}</div>${f.senderAddress?`<div class="lbl" style="margin-top:6px;">Address</div><div class="val">${f.senderAddress}</div>`:""}<div class="val">${[f.senderCity,f.senderState,f.senderZip].filter(Boolean).join(", ")}</div></div><div class="invoice-block"><div class="invoice-title">INVOICE</div><div class="lbl" style="margin-top:6px;">Invoice #</div><div class="val" style="font-family:monospace;">${f.invoiceNumber||""}</div><div class="lbl" style="margin-top:4px;">Date</div><div class="val">${fmtDate(f.invoiceDate)}</div>${f.dueDate?`<div class="lbl" style="margin-top:4px;">Due</div><div class="val">${fmtDate(f.dueDate)}</div>`:""}</div></div><div class="sec-hdr"><div class="sec-hdr-cell">Bill To</div><div class="sec-hdr-cell">Job / Project</div></div><div class="cj-grid"><div class="cj-col"><div class="val" style="font-weight:600;">${f.clientName||""}</div>${f.clientAddress?`<div class="val">${f.clientAddress}</div>`:""}<div class="val">${[f.clientCity,f.clientState,f.clientZip].filter(Boolean).join(", ")}</div>${f.clientEmail?`<div class="val">${f.clientEmail}</div>`:""}</div><div class="cj-col"><div class="val" style="font-weight:600;">${f.jobName||""}</div>${f.jobDescription?`<div class="val" style="color:#555;margin-top:3px;">${f.jobDescription}</div>`:""}</div></div><table class="items"><thead><tr><th style="text-align:left;">Description</th><th>Qty / Hrs</th><th>Rate</th><th>Amount</th></tr></thead><tbody>${rows}</tbody></table><div class="totals-grid"><div class="notes-cell">${f.notes?`<strong>Notes:</strong><br/>${f.notes}`:`<span style="color:#ccc;">Notes / Comments</span>`}</div><div><div class="tr-row"><span>Subtotal</span><span>$${fmt(subtotal)}</span></div>${taxAmt>0?`<div class="tr-row"><span>Tax (${f.taxRate}%)</span><span>$${fmt(taxAmt)}</span></div>`:""}<div class="tr-row grand"><span>TOTAL</span><span>$${fmt(total)}</span></div></div></div><div class="payment-block"><div class="payment-hdr">How to Pay</div><div class="payment-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:0;">${(()=>{const ms=Array.isArray(f.paymentMethods)?f.paymentMethods:(f.paymentMethod?[f.paymentMethod]:["ACH"]);return ms.map((m,i)=>`<div style="padding:8px 12px;${i>0?"border-left:1px solid #9ee7f5;":""}">${m==="ACH"?`<div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">ACH / Wire</div><div class="pm-row"><div class="lbl">Bank</div><div class="val">${f.bankName||"—"}</div></div><div class="pm-row"><div class="lbl">Routing</div><div class="val" style="font-family:monospace;">${f.routingNumber||"—"}</div></div><div class="pm-row"><div class="lbl">Account</div><div class="val" style="font-family:monospace;">${f.accountNumber||"—"}</div></div>`:m==="Check"?`<div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">Check</div><div class="pm-row"><div class="lbl">Payable To</div><div class="val" style="font-weight:600;">${f.checkPayableTo||"—"}</div></div>`:m==="PayPal"?`<div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">PayPal</div><div class="pm-row"><div class="lbl">Email/Username</div><div class="val">${f.paypalHandle||"—"}</div></div>`:m==="Zelle"?`<div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">Zelle</div><div class="pm-row"><div class="lbl">Phone/Email</div><div class="val">${f.zelleHandle||"—"}</div></div>`:m==="Venmo"?`<div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">Venmo</div><div class="pm-row"><div class="lbl">Username</div><div class="val">${f.venmoHandle||"—"}</div></div>`:""}</div>`).join("")})()}</div></div><div class="footer-bar">Thank you for your business!</div></body></html>`;
                   return <iframe srcDoc={srcDoc} className="w-full border-0" style={{ minHeight: "70vh" }} title="Invoice Preview" />;
                 })()
               ) : (
@@ -3681,14 +3723,15 @@ ${printStyle}</style></head><body>
 
       {/* ── Invoice Generator Modal ── */}
       {showInvoiceGenerator && invoiceForm && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-start justify-center p-4 overflow-y-auto" onClick={() => setShowInvoiceGenerator(false)}>
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-start justify-center p-4 overflow-y-auto" onClick={() => { setShowInvoiceGenerator(false); setEditingInvoiceId(null); }}>
           <div className="bg-white rounded-2xl w-full max-w-3xl shadow-2xl my-6" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
               <div className="flex items-center gap-2.5">
                 <FileText size={18} className="text-blue-600" />
-                <h2 className="font-bold text-slate-800 text-base">Create Invoice</h2>
+                <h2 className="font-bold text-slate-800 text-base">{editingInvoiceId ? "Edit Invoice" : "Create Invoice"}</h2>
+                {editingInvoiceId && <span className="text-xs bg-amber-100 text-amber-700 border border-amber-200 px-2 py-0.5 rounded-full font-semibold">Editing</span>}
               </div>
-              <button onClick={() => setShowInvoiceGenerator(false)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
+              <button onClick={() => { setShowInvoiceGenerator(false); setEditingInvoiceId(null); }} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
             </div>
 
             <div className="px-6 py-5 space-y-5">
@@ -4042,69 +4085,84 @@ ${printStyle}</style></head><body>
 
               {/* PAYMENT INFO */}
               <div className="border-t border-slate-100 pt-4">
-                <div className="flex items-center gap-3 mb-3">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Payment Method</p>
-                  {["ACH", "Check", "PayPal", "Zelle", "Venmo"].map(m => (
-                    <button key={m} onClick={() => setInvoiceForm(p => ({ ...p, paymentMethod: m }))}
-                      className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${
-                        invoiceForm.paymentMethod === m
-                          ? "bg-blue-600 text-white border-blue-600"
-                          : "bg-white text-slate-500 border-slate-300 hover:border-blue-400 hover:text-blue-600"
-                      }`}>{m}</button>
+                <div className="flex items-center flex-wrap gap-2 mb-3">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Payment Methods</p>
+                  <p className="text-[10px] text-slate-400 italic">Select all that apply — each will appear on the invoice</p>
+                  {["ACH", "Check", "PayPal", "Zelle", "Venmo"].map(m => {
+                    const active = (invoiceForm.paymentMethods || []).includes(m);
+                    return (
+                      <button key={m} onClick={() => setInvoiceForm(p => {
+                        const methods = p.paymentMethods || [];
+                        return { ...p, paymentMethods: active ? methods.filter(x => x !== m) : [...methods, m] };
+                      })}
+                        className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${
+                          active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-slate-500 border-slate-300 hover:border-blue-400 hover:text-blue-600"
+                        }`}>{active ? "✓ " : ""}{m}</button>
+                    );
+                  })}
+                </div>
+                {(invoiceForm.paymentMethods || []).length === 0 && (
+                  <p className="text-xs text-amber-600 mb-3">⚠ Select at least one payment method to display on the invoice.</p>
+                )}
+                <div className="space-y-3">
+                  {(invoiceForm.paymentMethods || []).map(m => (
+                    <div key={m} className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                      <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">{m === "ACH" ? "ACH / Wire Transfer" : m}</p>
+                      {m === "ACH" && (
+                        <div className="grid grid-cols-3 gap-3">
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase">Bank Name</label>
+                            <Input value={invoiceForm.bankName} onChange={e => setInvoiceForm(p => ({ ...p, bankName: e.target.value }))} placeholder="Chase, Wells Fargo…" />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase">Routing #</label>
+                            <Input value={invoiceForm.routingNumber} onChange={e => setInvoiceForm(p => ({ ...p, routingNumber: e.target.value.replace(/\D/g, "").slice(0, 9) }))} placeholder="123456789" className="font-mono" />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase">Account #</label>
+                            <Input value={invoiceForm.accountNumber} onChange={e => setInvoiceForm(p => ({ ...p, accountNumber: e.target.value.replace(/\D/g, "") }))} placeholder="Account number" className="font-mono" />
+                          </div>
+                        </div>
+                      )}
+                      {m === "PayPal" && (
+                        <div className="space-y-1 max-w-sm">
+                          <label className="text-[10px] font-bold text-slate-400 uppercase">PayPal Email / Username</label>
+                          <Input value={invoiceForm.paypalHandle} onChange={e => setInvoiceForm(p => ({ ...p, paypalHandle: e.target.value }))} placeholder="you@paypal.com or @username" />
+                        </div>
+                      )}
+                      {m === "Zelle" && (
+                        <div className="space-y-1 max-w-sm">
+                          <label className="text-[10px] font-bold text-slate-400 uppercase">Zelle Phone / Email</label>
+                          <Input value={invoiceForm.zelleHandle} onChange={e => setInvoiceForm(p => ({ ...p, zelleHandle: e.target.value }))} placeholder="(555) 000-0000 or you@email.com" />
+                        </div>
+                      )}
+                      {m === "Venmo" && (
+                        <div className="space-y-1 max-w-sm">
+                          <label className="text-[10px] font-bold text-slate-400 uppercase">Venmo Username</label>
+                          <Input value={invoiceForm.venmoHandle} onChange={e => setInvoiceForm(p => ({ ...p, venmoHandle: e.target.value }))} placeholder="@your-venmo" />
+                        </div>
+                      )}
+                      {m === "Check" && (
+                        <div className="space-y-1 max-w-sm">
+                          <label className="text-[10px] font-bold text-slate-400 uppercase">Make Check Payable To</label>
+                          <Input value={invoiceForm.checkPayableTo} onChange={e => setInvoiceForm(p => ({ ...p, checkPayableTo: e.target.value }))} placeholder="Your name or business name" />
+                        </div>
+                      )}
+                    </div>
                   ))}
                 </div>
-                {invoiceForm.paymentMethod === "ACH" && (
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Bank Name</label>
-                      <Input value={invoiceForm.bankName} onChange={e => setInvoiceForm(p => ({ ...p, bankName: e.target.value }))} placeholder="Chase, Wells Fargo…" />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Routing #</label>
-                      <Input value={invoiceForm.routingNumber} onChange={e => setInvoiceForm(p => ({ ...p, routingNumber: e.target.value.replace(/\D/g, "").slice(0, 9) }))} placeholder="123456789" className="font-mono" />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Account #</label>
-                      <Input value={invoiceForm.accountNumber} onChange={e => setInvoiceForm(p => ({ ...p, accountNumber: e.target.value.replace(/\D/g, "") }))} placeholder="Account number" className="font-mono" />
-                    </div>
-                  </div>
-                )}
-                {invoiceForm.paymentMethod === "PayPal" && (
-                  <div className="space-y-1 max-w-sm">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase">PayPal Email / Username</label>
-                    <Input value={invoiceForm.paypalHandle} onChange={e => setInvoiceForm(p => ({ ...p, paypalHandle: e.target.value }))} placeholder="you@paypal.com or @username" />
-                  </div>
-                )}
-                {invoiceForm.paymentMethod === "Zelle" && (
-                  <div className="space-y-1 max-w-sm">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase">Zelle Phone / Email</label>
-                    <Input value={invoiceForm.zelleHandle} onChange={e => setInvoiceForm(p => ({ ...p, zelleHandle: e.target.value }))} placeholder="(555) 000-0000 or you@email.com" />
-                  </div>
-                )}
-                {invoiceForm.paymentMethod === "Venmo" && (
-                  <div className="space-y-1 max-w-sm">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase">Venmo Username</label>
-                    <Input value={invoiceForm.venmoHandle} onChange={e => setInvoiceForm(p => ({ ...p, venmoHandle: e.target.value }))} placeholder="@your-venmo" />
-                  </div>
-                )}
-                {invoiceForm.paymentMethod === "Check" && (
-                  <div className="space-y-1 max-w-sm">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase">Make Check Payable To</label>
-                    <Input value={invoiceForm.checkPayableTo} onChange={e => setInvoiceForm(p => ({ ...p, checkPayableTo: e.target.value }))} placeholder="Your name or business name" />
-                  </div>
-                )}
               </div>
 
             </div>
 
             <div className="px-6 pb-5 pt-4 flex items-center justify-between gap-3 border-t border-slate-200 bg-slate-50 rounded-b-2xl">
-              <Button variant="outline" onClick={() => setShowInvoiceGenerator(false)}>Cancel</Button>
+              <Button variant="outline" onClick={() => { setShowInvoiceGenerator(false); setEditingInvoiceId(null); }}>Cancel</Button>
               <div className="flex gap-2">
                 <Button variant="outline" onClick={() => downloadInvoicePDF(invoiceForm, false)} className="gap-1.5">
                   <Download size={15} />Preview PDF
                 </Button>
                 <Button onClick={() => { downloadInvoicePDF(invoiceForm, true); setShowInvoiceGenerator(false); setActiveTab("invoices"); }} className="gap-1.5">
-                  <Download size={15} />Save &amp; Download
+                  <Download size={15} />{editingInvoiceId ? "Save & Update" : "Save & Download"}
                 </Button>
               </div>
             </div>
@@ -4699,6 +4757,11 @@ ${printStyle}</style></head><body>
                                     <Button variant="outline" className="flex-none" onClick={() => setPreviewItem(item)} title="Preview invoice">
                                       <Eye size={15} className="mr-1.5" /> View
                                     </Button>
+                                    {item.generated && item.generatedData && (
+                                      <Button variant="outline" className="flex-none text-blue-600 border-blue-200 hover:bg-blue-50" onClick={() => openEditInvoice(item)} title="Edit invoice">
+                                        <Pencil size={15} className="mr-1.5" />Edit
+                                      </Button>
+                                    )}
                                     {effectiveStatus !== "Paid" ? (
                                       <Button variant="success" className="flex-1" onClick={() => {
                                         setMarkPaidModal({ id: item.id, idx, amount: parseFloat(item.amount) || 0, existingPayments: item.payments || [] });
