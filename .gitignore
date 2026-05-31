@@ -18,6 +18,8 @@ silicon-axle*.json
 ~$*.xml
 *.pdf
 context_*.json
+dist/
+public/logo.png
 context_*.md
 data.json
 

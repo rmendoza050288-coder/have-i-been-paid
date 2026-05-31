@@ -1,6 +1,6 @@
 {
   "name": "have-i-been-paid",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "private": true,
   "main": "electron/main.js",
   "scripts": {
@@ -8,9 +8,10 @@
     "build": "next build",
     "start": "next start",
     "electron:dev": "electron .",
-    "dist": "npm run build && cp -r .next/static .next/standalone/.next/static && electron-builder --mac dmg --universal"
+    "dist": "npm run build && cp -r .next/static .next/standalone/.next/static && electron-builder --mac dmg --universal && electron-builder --win nsis --x64"
   },
   "dependencies": {
+    "heic2any": "^0.0.4",
     "lucide-react": "^0.424.0",
     "next": "14.2.29",
     "react": "^18.3.1",
@@ -62,7 +63,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },

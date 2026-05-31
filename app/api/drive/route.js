@@ -135,6 +135,18 @@ export async function POST(request) {
       return Response.json({ content: data });
     }
 
+    // Download a binary file (receipts) as base64
+    if (action === "downloadBinary") {
+      const { fileId } = params;
+      const metaRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=mimeType,name&supportsAllDrives=true`, { headers: auth });
+      const meta = await metaRes.json();
+      const dataRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`, { headers: auth });
+      if (!dataRes.ok) return Response.json({ error: "File not accessible" }, { status: 404 });
+      const buf = await dataRes.arrayBuffer();
+      const base64 = Buffer.from(buf).toString("base64");
+      return Response.json({ base64, mimeType: meta.mimeType || "application/octet-stream", name: meta.name || "receipt" });
+    }
+
     // Upload a binary file (receipts, invoice scans)
     if (action === "uploadBinary") {
       const { fileName, fileBase64, mimeType, parents } = params;

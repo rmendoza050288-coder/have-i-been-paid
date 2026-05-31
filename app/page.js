@@ -36,10 +36,17 @@ import {
   ChevronLeft,
   FileDown,
   Copy,
+  Utensils,
+  Moon,
+  Sun,
+  Calculator,
+  PenLine,
+  CreditCard,
+  Receipt,
 } from "lucide-react";
 
 const Card = ({ children, className = "" }) => (
-  <div className={`bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden ${className}`}>
+  <div className={`bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden dark:bg-slate-800 dark:border-slate-700 ${className}`}>
     {children}
   </div>
 );
@@ -48,17 +55,17 @@ const Button = ({ children, onClick, disabled, variant = "primary", className = 
   const base = "inline-flex items-center justify-center px-4 py-2 text-sm font-medium rounded-lg transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100";
   const v = {
     primary: "bg-blue-600 text-white hover:bg-blue-700 shadow-sm",
-    outline: "border border-gray-300 text-gray-700 bg-white hover:bg-gray-50",
+    outline: "border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 dark:border-slate-600 dark:text-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600",
     success: "bg-emerald-600 text-white hover:bg-emerald-700",
-    danger: "text-red-600 hover:bg-red-50",
-    ghost: "text-slate-500 hover:bg-slate-100",
+    danger: "text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30",
+    ghost: "text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-700",
   };
   return <button onClick={onClick} disabled={disabled} className={`${base} ${v[variant]} ${className}`}>{children}</button>;
 };
 
 const Input = ({ type = "text", value, onChange, placeholder, className = "", disabled = false }) => (
   <input type={type} value={value} onChange={onChange} placeholder={placeholder} disabled={disabled}
-    className={`flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm transition-all focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-50 ${className}`} />
+    className={`flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm transition-all focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-50 dark:bg-slate-700 dark:border-slate-600 dark:text-slate-100 dark:placeholder-slate-500 dark:disabled:bg-slate-800 ${className}`} />
 );
 
 // ── Parse extracted OCR text for invoice fields ──────────────────────────────
@@ -374,6 +381,11 @@ function calcOTBreakdown6thDay(hours) {
   return { hours1x: 0, hours15x: 12, hours2x: parseFloat((hours - 12).toFixed(2)) };
 }
 
+function calcOTBreakdown7thDay(hours) {
+  // 7th-day: ALL hours at 2× double time
+  return { hours1x: 0, hours15x: 0, hours2x: parseFloat(hours.toFixed(2)) };
+}
+
 function applyWeekOTRules(days, guarHours) {
   // Find worked days sorted by date to determine 5th and 6th
   const worked = days
@@ -382,6 +394,8 @@ function applyWeekOTRules(days, guarHours) {
     .sort((a, b) => a.date.localeCompare(b.date));
 
   let sixthDayIdx = null;
+  let seventhDayIdx = null;
+  if (worked.length >= 7) seventhDayIdx = worked[6].i;
   if (worked.length >= 6) {
     const day5 = days[worked[4].i];
     const day6 = days[worked[5].i];
@@ -397,7 +411,7 @@ function applyWeekOTRules(days, guarHours) {
   return days.map((d, i) => {
     const actualHours = calcDayHours(d);
     const paidHours = actualHours > 0 ? Math.max(actualHours, guarHours) : 0;
-    const breakdown = (i === sixthDayIdx) ? calcOTBreakdown6thDay(paidHours) : calcOTBreakdown(paidHours);
+    const breakdown = (i === seventhDayIdx) ? calcOTBreakdown7thDay(paidHours) : (i === sixthDayIdx) ? calcOTBreakdown6thDay(paidHours) : calcOTBreakdown(paidHours);
     return { ...d, totalHours: actualHours, paidHours, ...breakdown };
   });
 }
@@ -418,6 +432,15 @@ function get6thDayIndex(days) {
   return worked[5].i;
 }
 
+function get7thDayIndex(days) {
+  const worked = days
+    .map((d, i) => ({ i, date: d.date, actualHours: calcDayHours(d) }))
+    .filter(x => x.actualHours > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  if (worked.length < 7) return -1;
+  return worked[6].i;
+}
+
 // Returns a Set of day indices where turnaround from previous day's wrap is < 10 hours
 function calcTurnaroundViolations(days) {
   const violations = new Set();
@@ -436,11 +459,17 @@ function calcTurnaroundViolations(days) {
 
 // Returns true if meal penalty should be auto-flagged (>6h worked, no meal break logged)
 function shouldAutoMealPenalty(day) {
-  if (!day.call || !day.wrap) return false;
+  if (!day.call) return false;
   const hours = day.totalHours ?? calcDayHours(day);
-  if (hours <= 6) return false;
-  if (day.meal1Out && day.meal1In) return false;
-  return true;
+  if (hours <= 0) return false;
+  // No meal break recorded at all and worked more than 6 hours
+  if (!day.meal1Out) return hours > 6;
+  // Meal recorded — check if it started within 6 hours of call
+  const toMins = t => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
+  let callMins = toMins(day.call);
+  let mealMins = toMins(day.meal1Out);
+  if (mealMins < callMins) mealMins += 24 * 60; // handle overnight
+  return (mealMins - callMins) > 6 * 60;
 }
 
 // Generates a CSV string from an array of row arrays and triggers a download
@@ -459,6 +488,38 @@ function downloadCSV(rows, filename) {
 
 const TAX_RATE = 0.25;
 const IRS_MILEAGE_RATE = 0.70; // 2025 IRS standard mileage rate ($/mi)
+
+// ── Depreciation helpers ─────────────────────────────────────────
+const MACRS_TABLES = {
+  "3yr":  [33.33, 44.45, 14.81, 7.41],
+  "5yr":  [20.00, 32.00, 19.20, 11.52, 11.52, 5.76],
+  "7yr":  [14.29, 24.49, 17.49, 12.49, 8.93, 8.92, 8.93, 4.46],
+  "10yr": [10.00, 18.00, 14.40, 11.52, 9.22, 7.37, 6.55, 6.55, 6.56, 6.55, 3.28],
+  "15yr": [5.00, 9.50, 8.55, 7.70, 6.93, 6.23, 5.90, 5.90, 5.91, 5.90, 5.91, 5.90, 5.91, 5.90, 5.91, 2.95],
+};
+const DEPR_LABELS = {
+  "section179": "Sec. 179",
+  "bonus": "Bonus",
+  "straight-line": "SL",
+  "macrs": "MACRS",
+};
+function calcEquipDeduction(p, forYear) {
+  const cost = parseFloat(p.amount) || 0;
+  const method = p.depreciationMethod || "section179";
+  const purchaseYear = p.date ? parseInt(p.date.slice(0, 4), 10) : NaN;
+  if (!cost || isNaN(purchaseYear)) return 0;
+  const yi = forYear - purchaseYear; // 0-based year index
+  if (method === "section179" || method === "bonus") return yi === 0 ? cost : 0;
+  if (method === "straight-line") {
+    const life = parseInt(p.usefulLife, 10) || 5;
+    return yi >= 0 && yi < life ? cost / life : 0;
+  }
+  if (method === "macrs") {
+    const table = MACRS_TABLES[p.macrsClass || "5yr"] || MACRS_TABLES["5yr"];
+    return yi >= 0 && yi < table.length ? cost * (table[yi] / 100) : 0;
+  }
+  return yi === 0 ? cost : 0;
+}
 
 const PAYMENT_TERMS = [
   { label: "Net 15", days: 15 },
@@ -530,6 +591,7 @@ export default function App() {
   const [invoices, setInvoices] = useState([]);
   const [timecards, setTimecards] = useState([]);
   const [activeTab, setActiveTab] = useState("invoices");
+  const [darkMode, setDarkMode] = useState(false);
   const [folderId, setFolderId] = useState(null);
   const [dataFileId, setDataFileId] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -547,6 +609,10 @@ export default function App() {
   const [holdDays, setHoldDays] = useState([]);
   const [calSelectMode, setCalSelectMode] = useState(false);
   const [calSelectedDates, setCalSelectedDates] = useState([]);
+  const [calendarNotes, setCalendarNotes] = useState({});
+  const [calNoteDate, setCalNoteDate] = useState(null);
+  const [calNoteEditing, setCalNoteEditing] = useState(false);
+  const [calNoteDraft, setCalNoteDraft] = useState("");
   const [holdNamePrompt, setHoldNamePrompt] = useState(false);
   const [holdNameInput, setHoldNameInput] = useState("");
   const [holdTypeInput, setHoldTypeInput] = useState("hold");
@@ -568,7 +634,7 @@ export default function App() {
   const [purchases, setPurchases] = useState([]);
   const [purchaseSubTab, setPurchaseSubTab] = useState("expendables");
   const [purchaseGroupBy, setPurchaseGroupBy] = useState("job"); // "job" | "vendor"
-  const [newPurchase, setNewPurchase] = useState({ name: "", vendor: "", amount: "", date: new Date().toISOString().split("T")[0], notes: "", serial: "", category: "expendables", jobId: "", isKit: false, kitDailyRate: "", kitWeeklyRate: "" });
+  const [newPurchase, setNewPurchase] = useState({ name: "", vendor: "", amount: "", date: new Date().toISOString().split("T")[0], notes: "", serial: "", category: "expendables", mealType: "business_meeting", jobId: "", isKit: false, kitDailyRate: "", kitWeeklyRate: "" });
   const [mileageLogs, setMileageLogs] = useState([]);
   const [newMileage, setNewMileage] = useState({ date: new Date().toISOString().split("T")[0], miles: "", purpose: "", company: "", jobId: "", vehicle: "" });
   const [vehicles, setVehicles] = useState([]);
@@ -599,7 +665,27 @@ export default function App() {
   // Local blob URL cache: itemId → { url, type }
   const blobCache = useRef(new Map());
   const [hydrated, setHydrated] = useState(false);
+  const reportIframeRef = useRef(null);
+  const reportHtmlRef = useRef(null);
+  const [showReportOverlay, setShowReportOverlay] = useState(false);
+  const [reportGenerating, setReportGenerating] = useState(false);
   useEffect(() => () => blobCache.current.forEach(v => URL.revokeObjectURL(v.url)), []);
+  useEffect(() => {
+    const saved = localStorage.getItem("hibp_dark_mode");
+    if (saved === "true") { setDarkMode(true); document.documentElement.classList.add("dark"); }
+  }, []);
+  const toggleDarkMode = () => {
+    const next = !darkMode;
+    setDarkMode(next);
+    document.documentElement.classList.toggle("dark", next);
+    localStorage.setItem("hibp_dark_mode", String(next));
+  };
+  useEffect(() => {
+    if (showReportOverlay && reportIframeRef.current && reportHtmlRef.current) {
+      const doc = reportIframeRef.current.contentDocument;
+      doc.open(); doc.write(reportHtmlRef.current); doc.close();
+    }
+  }, [showReportOverlay]);
 
   // Drive connection state (service account configured and reachable)
   const [driveConnected, setDriveConnected] = useState(false);
@@ -608,6 +694,11 @@ export default function App() {
   const [customFolderInput, setCustomFolderInput] = useState("");
   const [savedCustomFolderId, setSavedCustomFolderId] = useState("");
   const [relinkPreview, setRelinkPreview] = useState(null); // parsed JSON waiting for confirm
+  const [markPaidModal, setMarkPaidModal] = useState(null); // { id, idx, amount, existingPayments } | null
+  const [markPaidPartialAmt, setMarkPaidPartialAmt] = useState("");
+  const [markPaidMode, setMarkPaidMode] = useState(null); // "full" | "partial" | null
+  const [markPaidDate, setMarkPaidDate] = useState("");
+  const [markPaidMethod, setMarkPaidMethod] = useState("");
   const [driveCheckStatus, setDriveCheckStatus] = useState("idle"); // idle | checking | ok | error
   const [driveCheckError, setDriveCheckError] = useState("");
   const relinkInputRef = useRef(null);
@@ -633,6 +724,7 @@ export default function App() {
         if (Array.isArray(d.kitPackages)) setKitPackages(d.kitPackages);
         if (Array.isArray(d.clients)) setClients(d.clients);
         if (Array.isArray(d.holdDays)) setHoldDays(d.holdDays);
+        if (d.calendarNotes && typeof d.calendarNotes === "object" && !Array.isArray(d.calendarNotes)) setCalendarNotes(d.calendarNotes);
       }
       const ls = localStorage.getItem("hibp_last_synced");
       if (ls) setLastSynced(ls);
@@ -698,6 +790,30 @@ export default function App() {
     reader.readAsDataURL(file);
   });
 
+  // Silently convert HEIC/HEIF → JPEG using the browser's full image pipeline
+  // (Electron on macOS uses OS-level HEIC codecs via <img> element loading).
+  const normalizeReceiptFile = async (file) => {
+    const isHeic = /\.heic$/i.test(file.name) || /\.heif$/i.test(file.name)
+      || file.type === "image/heic" || file.type === "image/heif";
+    if (!isHeic) return file;
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/heic-convert", { method: "POST", body: fd });
+      if (!res.ok) return file;
+      const { base64 } = await res.json();
+      const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+      const blob = new Blob([bytes], { type: "image/jpeg" });
+      return new File(
+        [blob],
+        file.name.replace(/\.heic$/i, ".jpg").replace(/\.heif$/i, ".jpg"),
+        { type: "image/jpeg" }
+      );
+    } catch {
+      return file;
+    }
+  };
+
   // ── DRIVE INIT / SYNC ───────────────────────────────────────────────────────
   const initDrive = async () => {
     try {
@@ -760,9 +876,9 @@ export default function App() {
   // Depends on `hydrated` so it only fires after the load effect's setState calls have rendered.
   useEffect(() => {
     if (!hydrated) return;
-    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients, holdDays };
+    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients, holdDays, calendarNotes };
     try { localStorage.setItem("hibp_data", JSON.stringify(data)); } catch {}
-  }, [hydrated, invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients, holdDays]);
+  }, [hydrated, invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients, holdDays, calendarNotes]);
 
   // ── EXPORT / RELINK ──────────────────────────────────────────────────────────
   const exportData = () => {
@@ -941,6 +1057,7 @@ export default function App() {
   const uploadReceiptForExpense = async (expenseId, file) => {
     if (!folderId) { alert("Drive not configured. Set up Drive to save receipts."); return; }
     try {
+      file = await normalizeReceiptFile(file);
       const fileBase64 = await fileToBase64(file);
       const res = await drivePost({ action: "uploadBinary", fileName: `receipt_${file.name}`, fileBase64, mimeType: file.type, parents: [folderId] });
       if (res.id) setVehicleExpenses(prev => prev.map(v => v.id === expenseId ? { ...v, receiptFileId: res.id } : v));
@@ -956,6 +1073,7 @@ export default function App() {
   const uploadReceiptForGas = async (gasId, file) => {
     if (!folderId) { alert("Drive not configured. Set up Drive to save receipts."); return; }
     try {
+      file = await normalizeReceiptFile(file);
       const fileBase64 = await fileToBase64(file);
       const res = await drivePost({ action: "uploadBinary", fileName: `gas_receipt_${file.name}`, fileBase64, mimeType: file.type, parents: [folderId] });
       if (res.id) setGasLogs(prev => prev.map(g => g.id === gasId ? { ...g, receiptFileId: res.id } : g));
@@ -1203,7 +1321,7 @@ export default function App() {
     const kitRentalDays = days.filter(d => d.totalHours > 0 || d.call).length;
     const kitRentalPay = parseFloat((kitRentalRate * kitRentalDays).toFixed(2));
     const total = parseFloat((days.reduce((a, d) => a + (d.hours1x * rate) + (d.hours15x * rate * 1.5) + (d.hours2x * rate * 2), 0) + mealPenaltyPay + perDiemTotal + kitRentalPay).toFixed(2));
-    setTimecards(prev => [{ id: crypto.randomUUID(), company: newTimecard.company, jobName: newTimecard.jobName, jobClassification: newTimecard.jobClassification, guarHours, hours, rate, dayRate: parseFloat(newTimecard.dayRate) || 0, dayRateType: newTimecard.dayRateType || "10", total, mealPenaltyPay, workPerDiem, daysOffPerDiem, perDiemTotal, kitRentalRate, kitRentalPay, date: newTimecard.weekEnding, days, description: newTimecard.description, status: "Unpaid", jobId: newTimecard.jobId || "", workerName: newTimecard.workerName || "", workerEmail: newTimecard.workerEmail || "", last4SS: newTimecard.last4SS || "", mileage: parseFloat(newTimecard.mileage) || 0, signatureName: newTimecard.workerName || "", signatureFont: newTimecard.signatureFont || "Dancing Script", signatureDate: newTimecard.signatureDate || "", locked: true, timestamp: Date.now() }, ...prev]);
+    setTimecards(prev => [{ id: crypto.randomUUID(), company: newTimecard.company, jobName: newTimecard.jobName, jobClassification: newTimecard.jobClassification, guarHours, hours, rate, dayRate: parseFloat(newTimecard.dayRate) || 0, dayRateType: newTimecard.dayRateType || "10", total, mealPenaltyPay, workPerDiem, daysOffPerDiem, perDiemTotal, kitRentalRate, kitRentalPay, date: newTimecard.weekEnding, days, description: newTimecard.description, status: "Unpaid", jobId: newTimecard.jobId || "", workerName: newTimecard.workerName || "", workerEmail: newTimecard.workerEmail || "", last4SS: newTimecard.last4SS || "", mileage: parseFloat(newTimecard.mileage) || 0, signatureName: newTimecard.workerName || "", signatureFont: newTimecard.signatureFont || "Dancing Script", signatureDate: newTimecard.signatureDate || "", locked: false, timestamp: Date.now() }, ...prev]);
     if (newTimecard.jobId) setExpandedJobs(prev => { const n = new Set(prev); n.add(newTimecard.jobId); return n; });
     setNewTimecard(p => { const we = p.weekEnding; return { company: "", jobName: "", jobClassification: "", guarHours: p.guarHours, rate: "", dayRate: "", dayRateType: p.dayRateType || "10", weekEnding: we, days: initWeekDays(we), description: "", jobId: p.jobId, workerName: p.workerName, workerEmail: p.workerEmail, last4SS: p.last4SS, mileage: "", workPerDiem: p.workPerDiem, daysOffPerDiem: p.daysOffPerDiem, kitRentalRate: p.kitRentalRate, signatureFont: p.signatureFont, signatureDate: new Date().toISOString().split("T")[0] }; });
   };
@@ -1792,6 +1910,8 @@ ${printStyle}</style></head><body>
   };
 
   const updateLineItem = (id, field, val) => {
+    setInvoiceForm(prev => {
+      const items = prev.lineItems.map(li => {
         if (li.id !== id) return li;
         const updated = { ...li, [field]: val };
         if (field === "qty" || field === "rate") {
@@ -2063,6 +2183,451 @@ ${printStyle}</style></head><body>
     w.document.close();
     setTimeout(() => w.print(), 400);
   };
+
+  // ── EXPENSE TAX REPORT ───────────────────────────────────────────────────────
+  const generateExpenseReport = async (category) => {
+    // category: "expendables" | "equipment" | "gas" | "vehicle"
+    const fmtDate = (d) => { if (!d) return ""; try { return new Date(d + "T12:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { return d; } };
+    const fmtMoney = (n) => (parseFloat(n) || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
+    let profile = {};
+    try { profile = JSON.parse(localStorage.getItem("hibp_sender_profile") || "{}"); } catch {}
+    const ownerName = profile.senderName || "";
+    const genDate = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+
+    setReportGenerating(true);
+
+    // Helper: base64 from Drive → data URL (for gas/vehicle receipts stored only on Drive)
+    const base64ToBytes = (b64) => { const bin = atob(b64); const bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); return bytes; };
+
+    // Rasterize a PDF (Uint8Array) to an array of PNG data URLs using PDF.js
+    const pdfToImages = async (pdfBytes) => {
+      if (!window.pdfjsLib) {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+          s.onload = resolve; s.onerror = reject;
+          document.head.appendChild(s);
+        });
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+          "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+      }
+      const pdf = await window.pdfjsLib.getDocument({ data: pdfBytes }).promise;
+      const pages = [];
+      for (let n = 1; n <= pdf.numPages; n++) {
+        const page = await pdf.getPage(n);
+        const viewport = page.getViewport({ scale: 2 });
+        const canvas = document.createElement("canvas");
+        canvas.width = viewport.width; canvas.height = viewport.height;
+        await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+        pages.push(canvas.toDataURL("image/png"));
+      }
+      return pages;
+    };
+
+    // Helper: fetch receipt for one item — returns { imgSrcs: string[], mimeType, fileName } or null
+    // Convert a base64 HEIC/HEIF image to JPEG via the server-side sips converter.
+    // Returns a data URL (JPEG if successful, original mimeType as fallback).
+    const convertHeicBase64 = async (base64, mimeType, fileName) => {
+      try {
+        const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+        const blob = new Blob([bytes], { type: mimeType });
+        const file = new File([blob], fileName || "receipt.heic", { type: mimeType });
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await fetch("/api/heic-convert", { method: "POST", body: fd });
+        if (!res.ok) return `data:${mimeType};base64,${base64}`;
+        const { base64: jpegB64 } = await res.json();
+        return `data:image/jpeg;base64,${jpegB64}`;
+      } catch {
+        return `data:${mimeType};base64,${base64}`;
+      }
+    };
+    const isHeicMime = (m) => m === "image/heic" || m === "image/heif";
+
+    // imgSrcs is always an array: 1 entry for images, N entries (one per page) for PDFs.
+    const fetchReceipt = async (item, itemType) => {
+      try {
+        if (itemType === "purchase") {
+          const cached = blobCache.current.get("receipt_" + item.id);
+          if (cached?.url) {
+            const mimeType = cached.type || item.receipt?.fileType || "image/jpeg";
+            if (mimeType === "application/pdf") {
+              const ab = await fetch(cached.url).then(r => r.arrayBuffer());
+              const imgSrcs = await pdfToImages(new Uint8Array(ab));
+              return { imgSrcs, mimeType, fileName: item.receipt?.fileName || "receipt" };
+            }
+            if (isHeicMime(mimeType)) {
+              const ab = await fetch(cached.url).then(r => r.arrayBuffer());
+              const b64 = btoa(String.fromCharCode(...new Uint8Array(ab)));
+              const dataUrl = await convertHeicBase64(b64, mimeType, item.receipt?.fileName);
+              return { imgSrcs: [dataUrl], mimeType: "image/jpeg", fileName: item.receipt?.fileName || "receipt" };
+            }
+            return { imgSrcs: [cached.url], mimeType, fileName: item.receipt?.fileName || "receipt" };
+          }
+          if (item.receipt?.fileId) {
+            const res = await drivePost({ action: "downloadBinary", fileId: item.receipt.fileId });
+            if (res.base64) {
+              if (res.mimeType === "application/pdf") {
+                const imgSrcs = await pdfToImages(base64ToBytes(res.base64));
+                return { imgSrcs, mimeType: res.mimeType, fileName: res.name || item.receipt.fileName || "receipt" };
+              }
+              if (isHeicMime(res.mimeType)) {
+                const dataUrl = await convertHeicBase64(res.base64, res.mimeType, res.name || item.receipt.fileName);
+                return { imgSrcs: [dataUrl], mimeType: "image/jpeg", fileName: res.name || item.receipt.fileName || "receipt" };
+              }
+              return { imgSrcs: [`data:${res.mimeType};base64,${res.base64}`], mimeType: res.mimeType, fileName: res.name || item.receipt.fileName || "receipt" };
+            }
+          }
+        } else {
+          const fileId = item.receiptFileId;
+          if (fileId) {
+            const res = await drivePost({ action: "downloadBinary", fileId });
+            if (res.base64) {
+              if (res.mimeType === "application/pdf") {
+                const imgSrcs = await pdfToImages(base64ToBytes(res.base64));
+                return { imgSrcs, mimeType: res.mimeType, fileName: res.name || "receipt" };
+              }
+              if (isHeicMime(res.mimeType)) {
+                const dataUrl = await convertHeicBase64(res.base64, res.mimeType, res.name);
+                return { imgSrcs: [dataUrl], mimeType: "image/jpeg", fileName: res.name || "receipt" };
+              }
+              return { imgSrcs: [`data:${res.mimeType};base64,${res.base64}`], mimeType: res.mimeType, fileName: res.name || "receipt" };
+            }
+          }
+        }
+      } catch (e) { console.warn("Receipt fetch failed for", item.id, e); }
+      return null;
+    };
+
+    const sharedStyles = `
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: 'Century Gothic', 'Gill Sans', Arial, sans-serif; font-size: 11px; color: #222; padding: 28px 32px; }
+      h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 2px; }
+      .sub { font-size: 11px; color: #666; margin-bottom: 18px; }
+      .section-title { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: #fff; padding: 4px 10px; margin-bottom: 0; }
+      table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+      th { font-size: 8.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; padding: 5px 8px; border: 1px solid #e2e8f0; text-align: left; }
+      td { padding: 5px 8px; border: 1px solid #e2e8f0; font-size: 10.5px; vertical-align: middle; }
+      tr:nth-child(even) td { background: #f8fafc; }
+      .num { text-align: right; font-variant-numeric: tabular-nums; }
+      .total-row td { font-weight: 700; border-top: 2px solid #cbd5e1; }
+      .has-receipt { font-size: 8.5px; font-weight: 700; text-transform: uppercase; padding: 1px 6px; border-radius: 3px; background: #d1fae5; color: #065f46; }
+      .no-receipt { font-size: 9px; color: #94a3b8; font-style: italic; }
+      .footer { margin-top: 24px; border-top: 1px solid #e2e8f0; padding-top: 10px; font-size: 9px; color: #888; }
+      .summary-table th { background: #f1f5f9; }
+      .receipt-page { page-break-before: always; padding: 20px 28px; }
+      .receipt-header { font-size: 10px; font-weight: 700; color: #475569; padding-bottom: 8px; margin-bottom: 12px; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; }
+      .receipt-header .idx { font-size: 9px; color: #94a3b8; }
+      .receipt-img { max-width: 100%; max-height: calc(100vh - 80px); display: block; margin: 0 auto; object-fit: contain; }
+      @media print { body { padding: 10px; } }
+    `;
+
+    // Build receipt pages — every page in the output is a flat <img> (no iframes/embeds)
+    // PDFs have already been rasterized to per-page PNGs by fetchReceipt.
+    const buildReceiptPages = (pairs) => {
+      const valid = pairs.filter(p => p.receipt?.imgSrcs?.length > 0);
+      if (valid.length === 0) return "";
+      const totalPages = valid.reduce((acc, p) => acc + p.receipt.imgSrcs.length, 0);
+      let pageCounter = 0;
+      return valid.map(({ item, receipt, itemLabel }) => {
+        const desc = itemLabel || item.name || item.vendor || item.station || item.vehicle || "Receipt";
+        const mt = receipt.mimeType || "";
+        return receipt.imgSrcs.map(src => {
+          pageCounter++;
+          const content = `<img class="receipt-img" src="${src}" />`;
+          return `
+            <div class="receipt-page">
+              <div class="receipt-header">
+                <span>📎 ${desc} &nbsp;&bull;&nbsp; ${fmtDate(item.date)} &nbsp;&bull;&nbsp; ${fmtMoney(item.amount)} &nbsp;&bull;&nbsp; ${receipt.fileName}</span>
+                <span class="idx">${pageCounter} of ${totalPages}</span>
+              </div>
+              ${content}
+            </div>`;
+        }).join("");
+      }).join("");
+    };
+
+    if (category === "expendables" || category === "equipment") {
+      const items = filteredPurchases.filter(p => p.category === category).slice().sort((a, b) => a.date.localeCompare(b.date));
+      if (items.length === 0) { setReportGenerating(false); alert(`No ${category} logged for ${selectedYear}.`); return; }
+      const total = items.reduce((a, b) => a + (parseFloat(b.amount) || 0), 0);
+      const label = category === "expendables" ? "Expendables" : "Equipment";
+      const accent = category === "expendables" ? "#e11d48" : "#7c3aed";
+      const accentLight = category === "expendables" ? "#fff1f2" : "#f5f3ff";
+      const accentBorder = category === "expendables" ? "#fda4af" : "#c4b5fd";
+
+      // Fetch all receipts in parallel
+      const receipts = await Promise.all(items.map(p => fetchReceipt(p, "purchase")));
+      const pairs = items.map((item, i) => ({ item, receipt: receipts[i], itemLabel: item.name }));
+      const receiptCount = pairs.filter(p => p.receipt).length;
+
+      const byVendor = {};
+      items.forEach(p => { const v = p.vendor?.trim() || "(no vendor)"; if (!byVendor[v]) byVendor[v] = 0; byVendor[v] += parseFloat(p.amount) || 0; });
+
+      const DEPR_METHOD_LABELS = { "section179": "Section 179", "bonus": "Bonus Depreciation", "straight-line": "Straight-Line", "macrs": "MACRS" };
+      const rows = items.map((p, i) => {
+        const method = p.depreciationMethod || "section179";
+        const methodLabel = DEPR_METHOD_LABELS[method] || method;
+        const lifeClass = method === "straight-line" ? (p.usefulLife ? p.usefulLife + " yr" : "—") : method === "macrs" ? (p.macrsClass || "—") : "—";
+        const deduction = category === "equipment" ? calcEquipDeduction(p, selectedYear) : 0;
+        return `
+        <tr>
+          <td>${fmtDate(p.date)}</td>
+          <td>${p.name || "—"}</td>
+          <td>${p.vendor || "—"}</td>
+          <td>${p.notes || "—"}</td>
+          ${category === "equipment" ? `<td>${p.serial || "—"}</td><td>${methodLabel}</td><td>${lifeClass}</td><td class="num">${deduction > 0 ? fmtMoney(deduction) : "—"}</td>` : ""}
+          <td class="num">${fmtMoney(p.amount)}</td>
+          <td>${receipts[i] ? `<span class="has-receipt">✓ p.${pairs.slice(0, i + 1).filter((_, j) => receipts[j]).length}</span>` : `<span class="no-receipt">none</span>`}</td>
+        </tr>`;
+      }).join("");
+
+      const summaryRows = Object.entries(byVendor).sort((a, b) => b[1] - a[1]).map(([v, amt]) => `
+        <tr><td>${v}</td><td class="num">${fmtMoney(amt)}</td></tr>`).join("");
+
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8" /><title>${label} Report ${selectedYear}</title>
+      <style>${sharedStyles}
+        .section-title { background: ${accent}; }
+        th { background: ${accentLight}; border-color: ${accentBorder}; }
+        .total-row td { background: ${accentLight} !important; }
+        .summary-table th { background: #f1f5f9; border-color: #e2e8f0; }
+      </style></head><body>
+      <h1>${label} Expenses &mdash; ${selectedYear} Tax Year</h1>
+      <p class="sub">${ownerName ? ownerName + " &nbsp;&bull;&nbsp; " : ""}${items.length} item${items.length !== 1 ? "s" : ""} &nbsp;&bull;&nbsp; ${receiptCount} receipt${receiptCount !== 1 ? "s" : ""} attached &nbsp;&bull;&nbsp; Generated ${genDate}</p>
+
+      <div class="section-title">All ${label} (${items.length})</div>
+      <table>
+        <thead><tr>
+          <th>Date</th><th>Item</th><th>Vendor</th><th>Notes</th>
+          ${category === "equipment" ? "<th>Serial #</th><th>Depreciation Method</th><th>Life / Class</th><th class=\"num\">" + selectedYear + " Deduction</th>" : ""}
+          <th class="num">Amount</th><th>Receipt</th>
+        </tr></thead>
+        <tbody>
+          ${rows}
+          <tr class="total-row">
+            <td colspan="${category === "equipment" ? 8 : 4}">TOTAL</td>
+            <td class="num">${fmtMoney(total)}</td>
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="section-title" style="background:#475569">Summary by Vendor</div>
+      <table class="summary-table">
+        <thead><tr><th>Vendor</th><th class="num">Total Spent</th></tr></thead>
+        <tbody>
+          ${summaryRows}
+          <tr class="total-row"><td>GRAND TOTAL</td><td class="num">${fmtMoney(total)}</td></tr>
+        </tbody>
+      </table>
+
+      <div class="footer">Consult a tax professional for filing. ${category === "equipment" ? "Depreciation deductions shown are estimates &mdash; verify method eligibility with your accountant (Section 179 subject to annual limits; MACRS/SL spread over asset life). &nbsp;&bull;&nbsp; " : ""}This report was generated by Have I Been Paid? on ${genDate}.${receiptCount > 0 ? ` &nbsp;&bull;&nbsp; ${receiptCount} receipt${receiptCount !== 1 ? "s" : ""} follow on subsequent pages.` : ""}</div>
+      ${buildReceiptPages(pairs)}
+      </body></html>`;
+
+      reportHtmlRef.current = html;
+      setReportGenerating(false);
+      setShowReportOverlay(true);
+      return;
+    }
+
+    if (category === "meals") {
+      const items = filteredPurchases.filter(p => p.category === "meals").slice().sort((a, b) => a.date.localeCompare(b.date));
+      if (items.length === 0) { setReportGenerating(false); alert(`No meals logged for ${selectedYear}.`); return; }
+      const total = items.reduce((a, b) => a + (parseFloat(b.amount) || 0), 0);
+
+      const receipts = await Promise.all(items.map(p => fetchReceipt(p, "purchase")));
+      const pairs = items.map((item, i) => ({ item, receipt: receipts[i], itemLabel: item.name }));
+      const receiptCount = pairs.filter(p => p.receipt).length;
+
+      const byType = { "Business Meeting": 0, "Travel Dining": 0 };
+      items.forEach(p => {
+        const key = p.mealType === "travel_dining" ? "Travel Dining" : "Business Meeting";
+        byType[key] += parseFloat(p.amount) || 0;
+      });
+
+      const rows = items.map((p, i) => `
+        <tr>
+          <td>${fmtDate(p.date)}</td>
+          <td>${p.mealType === "travel_dining" ? "Travel Dining" : "Business Meeting"}</td>
+          <td>${p.name || "—"}</td>
+          <td>${p.vendor || "—"}</td>
+          <td>${p.notes || "—"}</td>
+          <td class="num">${fmtMoney(p.amount)}</td>
+          <td>${receipts[i] ? `<span class="has-receipt">✓ p.${pairs.slice(0, i + 1).filter((_, j) => receipts[j]).length}</span>` : `<span class="no-receipt">none</span>`}</td>
+        </tr>`).join("");
+
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8" /><title>Meals Report ${selectedYear}</title>
+      <style>${sharedStyles}
+        .section-title { background: #d97706; }
+        th { background: #fffbeb; border-color: #fde68a; }
+        .total-row td { background: #fffbeb !important; }
+        .summary-table th { background: #f1f5f9; border-color: #e2e8f0; }
+      </style></head><body>
+      <h1>Meal Expenses &mdash; ${selectedYear} Tax Year</h1>
+      <p class="sub">${ownerName ? ownerName + " &nbsp;&bull;&nbsp; " : ""}${items.length} entry${items.length !== 1 ? "s" : ""} &nbsp;&bull;&nbsp; ${receiptCount} receipt${receiptCount !== 1 ? "s" : ""} attached &nbsp;&bull;&nbsp; Generated ${genDate}</p>
+
+      <div class="section-title">All Meal Expenses (${items.length})</div>
+      <table>
+        <thead><tr>
+          <th>Date</th><th>Type</th><th>Description</th><th>Vendor / Restaurant</th><th>Notes</th>
+          <th class="num">Amount</th><th>Receipt</th>
+        </tr></thead>
+        <tbody>
+          ${rows}
+          <tr class="total-row">
+            <td colspan="5">TOTAL</td>
+            <td class="num">${fmtMoney(total)}</td>
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="section-title" style="background:#475569">Summary by Type</div>
+      <table class="summary-table">
+        <thead><tr><th>Meal Type</th><th class="num">Total Spent</th></tr></thead>
+        <tbody>
+          ${Object.entries(byType).map(([k, v]) => `<tr><td>${k}</td><td class="num">${fmtMoney(v)}</td></tr>`).join("")}
+          <tr class="total-row"><td>GRAND TOTAL</td><td class="num">${fmtMoney(total)}</td></tr>
+        </tbody>
+      </table>
+
+      <div class="footer">Consult a tax professional for filing. Meal deductibility rules apply (typically 50% for business meals). This report was generated by Have I Been Paid? on ${genDate}.${receiptCount > 0 ? ` &nbsp;&bull;&nbsp; ${receiptCount} receipt${receiptCount !== 1 ? "s" : ""} follow on subsequent pages.` : ""}</div>
+      ${buildReceiptPages(pairs)}
+      </body></html>`;
+
+      reportHtmlRef.current = html;
+      setReportGenerating(false);
+      setShowReportOverlay(true);
+      return;
+    }
+
+    if (category === "gas") {
+      const items = filteredGasLogs.slice().sort((a, b) => a.date.localeCompare(b.date));
+      if (items.length === 0) { setReportGenerating(false); alert(`No gas logs for ${selectedYear}.`); return; }
+      const total = items.reduce((a, b) => a + (parseFloat(b.amount) || 0), 0);
+
+      const receipts = await Promise.all(items.map(g => fetchReceipt(g, "gas")));
+      const pairs = items.map((item, i) => ({ item, receipt: receipts[i], itemLabel: item.station || item.vehicle }));
+      const receiptCount = pairs.filter(p => p.receipt).length;
+
+      const byVehicle = {};
+      items.forEach(g => { const v = g.vehicle?.trim() || "(unspecified)"; if (!byVehicle[v]) byVehicle[v] = 0; byVehicle[v] += parseFloat(g.amount) || 0; });
+
+      const rows = items.map((g, i) => `
+        <tr>
+          <td>${fmtDate(g.date)}</td>
+          <td>${g.vehicle || "—"}</td>
+          <td>${g.station || "—"}</td>
+          <td>${g.pricePerGallon ? "$" + parseFloat(g.pricePerGallon).toFixed(3) + "/gal" : "—"}</td>
+          <td>${g.notes || "—"}</td>
+          <td class="num">${fmtMoney(g.amount)}</td>
+          <td>${receipts[i] ? `<span class="has-receipt">✓ p.${pairs.slice(0, i + 1).filter((_, j) => receipts[j]).length}</span>` : `<span class="no-receipt">none</span>`}</td>
+        </tr>`).join("");
+
+      const summaryRows = Object.entries(byVehicle).sort((a, b) => b[1] - a[1]).map(([v, amt]) => `
+        <tr><td>${v}</td><td class="num">${fmtMoney(amt)}</td></tr>`).join("");
+
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8" /><title>Gas Log ${selectedYear}</title>
+      <style>${sharedStyles}
+        .section-title { background: #d97706; }
+        th { background: #fffbeb; border-color: #fcd34d; }
+        .total-row td { background: #fffbeb !important; }
+      </style></head><body>
+      <h1>Gas Log &mdash; ${selectedYear} Tax Year</h1>
+      <p class="sub">${ownerName ? ownerName + " &nbsp;&bull;&nbsp; " : ""}${items.length} fill-up${items.length !== 1 ? "s" : ""} &nbsp;&bull;&nbsp; ${receiptCount} receipt${receiptCount !== 1 ? "s" : ""} attached &nbsp;&bull;&nbsp; Generated ${genDate}</p>
+
+      <div class="section-title">All Gas Purchases (${items.length})</div>
+      <table>
+        <thead><tr><th>Date</th><th>Vehicle</th><th>Station</th><th>Price/Gal</th><th>Notes</th><th class="num">Amount</th><th>Receipt</th></tr></thead>
+        <tbody>
+          ${rows}
+          <tr class="total-row"><td colspan="5">TOTAL</td><td class="num">${fmtMoney(total)}</td><td></td></tr>
+        </tbody>
+      </table>
+
+      <div class="section-title" style="background:#475569">Summary by Vehicle</div>
+      <table class="summary-table">
+        <thead><tr><th>Vehicle</th><th class="num">Total Gas Cost</th></tr></thead>
+        <tbody>
+          ${summaryRows}
+          <tr class="total-row"><td>GRAND TOTAL</td><td class="num">${fmtMoney(total)}</td></tr>
+        </tbody>
+      </table>
+
+      <div class="footer">Consult a tax professional for filing. This report was generated by Have I Been Paid? on ${genDate}.${receiptCount > 0 ? ` &nbsp;&bull;&nbsp; ${receiptCount} receipt${receiptCount !== 1 ? "s" : ""} follow on subsequent pages.` : ""}</div>
+      ${buildReceiptPages(pairs)}
+      </body></html>`;
+
+      reportHtmlRef.current = html;
+      setReportGenerating(false);
+      setShowReportOverlay(true);
+      return;
+    }
+
+    if (category === "vehicle") {
+      const items = filteredVehicleExpenses.slice().sort((a, b) => a.date.localeCompare(b.date));
+      if (items.length === 0) { setReportGenerating(false); alert(`No vehicle expenses for ${selectedYear}.`); return; }
+      const total = items.reduce((a, b) => a + (parseFloat(b.amount) || 0), 0);
+
+      const receipts = await Promise.all(items.map(v => fetchReceipt(v, "vehicle")));
+      const pairs = items.map((item, i) => ({ item, receipt: receipts[i], itemLabel: item.vehicle || item.category }));
+      const receiptCount = pairs.filter(p => p.receipt).length;
+
+      const byCategory = {};
+      items.forEach(v => { const c = v.category?.trim() || "other"; if (!byCategory[c]) byCategory[c] = 0; byCategory[c] += parseFloat(v.amount) || 0; });
+
+      const rows = items.map((v, i) => `
+        <tr>
+          <td>${fmtDate(v.date)}</td>
+          <td>${v.vehicle || "—"}</td>
+          <td style="text-transform:capitalize">${v.category || "other"}</td>
+          <td>${v.odometer ? v.odometer + " mi" : "—"}</td>
+          <td>${v.notes || "—"}</td>
+          <td class="num">${fmtMoney(v.amount)}</td>
+          <td>${receipts[i] ? `<span class="has-receipt">✓ p.${pairs.slice(0, i + 1).filter((_, j) => receipts[j]).length}</span>` : `<span class="no-receipt">none</span>`}</td>
+        </tr>`).join("");
+
+      const summaryRows = Object.entries(byCategory).sort((a, b) => b[1] - a[1]).map(([c, amt]) => `
+        <tr><td style="text-transform:capitalize">${c}</td><td class="num">${fmtMoney(amt)}</td></tr>`).join("");
+
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8" /><title>Vehicle Expenses ${selectedYear}</title>
+      <style>${sharedStyles}
+        .section-title { background: #0891b2; }
+        th { background: #ecfeff; border-color: #a5f3fc; }
+        .total-row td { background: #ecfeff !important; }
+      </style></head><body>
+      <h1>Vehicle Expenses &mdash; ${selectedYear} Tax Year</h1>
+      <p class="sub">${ownerName ? ownerName + " &nbsp;&bull;&nbsp; " : ""}${items.length} expense${items.length !== 1 ? "s" : ""} &nbsp;&bull;&nbsp; ${receiptCount} receipt${receiptCount !== 1 ? "s" : ""} attached &nbsp;&bull;&nbsp; Generated ${genDate}</p>
+
+      <div class="section-title">All Vehicle Expenses (${items.length})</div>
+      <table>
+        <thead><tr><th>Date</th><th>Vehicle</th><th>Category</th><th>Odometer</th><th>Notes</th><th class="num">Amount</th><th>Receipt</th></tr></thead>
+        <tbody>
+          ${rows}
+          <tr class="total-row"><td colspan="5">TOTAL</td><td class="num">${fmtMoney(total)}</td><td></td></tr>
+        </tbody>
+      </table>
+
+      <div class="section-title" style="background:#475569">Summary by Category</div>
+      <table class="summary-table">
+        <thead><tr><th>Category</th><th class="num">Total Spent</th></tr></thead>
+        <tbody>
+          ${summaryRows}
+          <tr class="total-row"><td>GRAND TOTAL</td><td class="num">${fmtMoney(total)}</td></tr>
+        </tbody>
+      </table>
+
+      <div class="footer">Consult a tax professional for filing. This report was generated by Have I Been Paid? on ${genDate}.${receiptCount > 0 ? ` &nbsp;&bull;&nbsp; ${receiptCount} receipt${receiptCount !== 1 ? "s" : ""} follow on subsequent pages.` : ""}</div>
+      ${buildReceiptPages(pairs)}
+      </body></html>`;
+
+      reportHtmlRef.current = html;
+      setReportGenerating(false);
+      setShowReportOverlay(true);
+    }
+  };
+
   const handleTimecardPaystubUpload = async (timecardId, file) => {
     if (!file) return;
     setPaystubUploading(timecardId);
@@ -2137,9 +2702,11 @@ ${printStyle}</style></head><body>
     (!sq || (p.name||'').toLowerCase().includes(sq) || (p.vendor||'').toLowerCase().includes(sq) || (p.notes||'').toLowerCase().includes(sq) || (p.serial||'').toLowerCase().includes(sq)));
   const filteredExpendables = filteredPurchases.filter(p => p.category === "expendables");
   const filteredEquipment = filteredPurchases.filter(p => p.category === "equipment");
+  const filteredMeals = filteredPurchases.filter(p => p.category === "meals");
   const totalExpendables = filteredExpendables.reduce((a, b) => a + (parseFloat(b.amount) || 0), 0);
   const totalEquipment = filteredEquipment.reduce((a, b) => a + (parseFloat(b.amount) || 0), 0);
-  const totalPurchases = totalExpendables + totalEquipment;
+  const totalMeals = filteredMeals.reduce((a, b) => a + (parseFloat(b.amount) || 0), 0);
+  const totalPurchases = totalExpendables + totalEquipment + totalMeals;
 
   const allMileageEntries = [
     ...timecards
@@ -2171,7 +2738,7 @@ ${printStyle}</style></head><body>
     });
     purchases.forEach(p => {
       if ((p.name||'').toLowerCase().includes(sq) || (p.vendor||'').toLowerCase().includes(sq) || (p.serial||'').toLowerCase().includes(sq) || (p.notes||'').toLowerCase().includes(sq))
-        results.push({ id: p.id, tab: "purchases", year: getYear(p.date), title: p.name || "Unnamed Item", sub: `${p.vendor ? p.vendor + " · " : ""}$${(parseFloat(p.amount)||0).toLocaleString(undefined,{minimumFractionDigits:2})}${p.serial ? " · SN:" + p.serial : ""} · ${p.date}`, badge: p.category === "equipment" ? "Equipment" : "Expendable", badgeColor: p.category === "equipment" ? "bg-violet-100 text-violet-700" : "bg-rose-100 text-rose-700", jobId: p.jobId, purchaseCategory: p.category });
+        results.push({ id: p.id, tab: "purchases", year: getYear(p.date), title: p.name || "Unnamed Item", sub: `${p.vendor ? p.vendor + " · " : ""}$${(parseFloat(p.amount)||0).toLocaleString(undefined,{minimumFractionDigits:2})}${p.serial ? " · SN:" + p.serial : ""} · ${p.date}`, badge: p.category === "equipment" ? "Equipment" : p.category === "meals" ? "Meal" : "Expendable", badgeColor: p.category === "equipment" ? "bg-violet-100 text-violet-700" : p.category === "meals" ? "bg-amber-100 text-amber-700" : "bg-rose-100 text-rose-700", jobId: p.jobId, purchaseCategory: p.category });
     });
     return results.slice(0, 12);
   })();
@@ -2201,7 +2768,7 @@ ${printStyle}</style></head><body>
     if (!newPurchase.name || isNaN(amount) || amount <= 0) return;
     setPurchases(prev => [{ id: crypto.randomUUID(), ...newPurchase, amount, locked: true, timestamp: Date.now() }, ...prev]);
     if (newPurchase.jobId) setExpandedJobs(prev => { const n = new Set(prev); n.add("pur_" + newPurchase.jobId); return n; });
-    setNewPurchase(p => ({ name: "", vendor: "", amount: "", date: new Date().toISOString().split("T")[0], notes: "", serial: "", category: p.category, jobId: p.jobId, isKit: false, kitDailyRate: "", kitWeeklyRate: "" }));
+    setNewPurchase(p => ({ name: "", vendor: "", amount: "", date: new Date().toISOString().split("T")[0], notes: "", serial: "", category: p.category, mealType: p.mealType || "business_meeting", jobId: p.jobId, isKit: false, kitDailyRate: "", kitWeeklyRate: "" }));
   };
 
   const deletePurchase = (id) => {
@@ -2215,6 +2782,7 @@ ${printStyle}</style></head><body>
 
   const handleReceiptUpload = async (purchaseId, file) => {
     if (!file) return;
+    file = await normalizeReceiptFile(file);
     const blobUrl = URL.createObjectURL(file);
     blobCache.current.set("receipt_" + purchaseId, { url: blobUrl, type: file.type });
 
@@ -2237,7 +2805,8 @@ ${printStyle}</style></head><body>
   const previewBlob = previewItem ? blobCache.current.get(previewItem.id) : null;
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 pb-20">
+    <>
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 pb-20 dark:bg-slate-900 dark:text-slate-100">
 
       {/* Hidden relink file input */}
       <input ref={relinkInputRef} type="file" accept=".json,application/json" onChange={handleRelinkFile} className="hidden" />
@@ -2547,10 +3116,13 @@ ${printStyle}</style></head><body>
       {/* ── Hold Name Prompt Modal ── */}
       {holdNamePrompt && (() => {
         const typeConfig = {
-          soft: { label: "Soft Hold", dot: "✏️", desc: "Tentative, can be moved", style: "border-pink-400 bg-pink-50 text-pink-800", ring: "ring-pink-400" },
-          hold: { label: "Hold", dot: "⏸", desc: "Standard hold", style: "border-blue-400 bg-blue-50 text-blue-800", ring: "ring-blue-400" },
-          locked: { label: "Locked", dot: "🔒", desc: "Confirmed, do not move", style: "border-orange-400 bg-orange-50 text-orange-900", ring: "ring-orange-400" },
-          travel: { label: "Travel", dot: "✈️", desc: "Travel day", style: "border-purple-400 bg-purple-50 text-purple-800", ring: "ring-purple-400" },
+          soft:   { label: "Soft Hold", dot: "✏️",  desc: "Tentative, can be moved",   style: "border-pink-400 bg-pink-50 text-pink-800",    ring: "ring-pink-400" },
+          hold:   { label: "Hold",      dot: "⏸",   desc: "Standard hold",             style: "border-blue-400 bg-blue-50 text-blue-800",    ring: "ring-blue-400" },
+          locked: { label: "Locked",    dot: "🔒",  desc: "Confirmed, do not move",   style: "border-orange-400 bg-orange-50 text-orange-900", ring: "ring-orange-400" },
+          travel: { label: "Travel",    dot: "✈️",  desc: "Travel day",               style: "border-purple-400 bg-purple-50 text-purple-800", ring: "ring-purple-400" },
+          prep:   { label: "Prep",      dot: "🔧",  desc: "Prep day",                 style: "border-teal-400 bg-teal-50 text-teal-800",    ring: "ring-teal-400" },
+          scout:  { label: "Scout",     dot: "🚧",  desc: "Location scout",           style: "border-cyan-400 bg-cyan-50 text-cyan-800",    ring: "ring-cyan-400" },
+          wrap:   { label: "Wrap",      dot: "📦",  desc: "Wrap day",                 style: "border-slate-400 bg-slate-100 text-slate-800", ring: "ring-slate-400" },
         };
         const tc = typeConfig[holdTypeInput] || typeConfig.hold;
         const applyHold = () => {
@@ -2573,7 +3145,7 @@ ${printStyle}</style></head><body>
               {/* Hold type selector */}
               <div>
                 <label className="block text-xs font-semibold text-slate-600 mb-2">Hold Type</label>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-4 gap-2">
                   {Object.entries(typeConfig).map(([key, cfg]) => (
                     <button
                       key={key}
@@ -2605,9 +3177,12 @@ ${printStyle}</style></head><body>
                 <button
                   onClick={applyHold}
                   className={`flex-1 px-4 py-2 text-sm font-bold rounded-xl transition-colors text-white ${
-                    holdTypeInput === "soft" ? "bg-pink-500 hover:bg-pink-600" :
+                    holdTypeInput === "soft"   ? "bg-pink-500 hover:bg-pink-600" :
                     holdTypeInput === "locked" ? "bg-orange-500 hover:bg-orange-600" :
                     holdTypeInput === "travel" ? "bg-purple-600 hover:bg-purple-700" :
+                    holdTypeInput === "prep"   ? "bg-teal-600 hover:bg-teal-700" :
+                    holdTypeInput === "scout"  ? "bg-cyan-600 hover:bg-cyan-700" :
+                    holdTypeInput === "wrap"   ? "bg-slate-600 hover:bg-slate-700" :
                     "bg-blue-600 hover:bg-blue-700"
                   }`}
                 >
@@ -3538,10 +4113,10 @@ ${printStyle}</style></head><body>
       )}
 
       {/* Nav */}
-      <nav className="bg-white border-b border-slate-200 sticky top-0 z-10">
+      <nav className="bg-white border-b border-slate-200 sticky top-0 z-10 dark:bg-slate-800 dark:border-slate-700">
         <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white"><FileText size={18} /></div>
+            <img src="/logo.png" alt="Have I Been Paid?" className="w-32 h-32 object-contain rounded-lg" />
             <span className="font-bold text-lg hidden sm:inline-block">Have I Been Paid?</span>
           </div>
           <div className="flex items-center gap-3">
@@ -3597,6 +4172,14 @@ ${printStyle}</style></head><body>
                 </Button>
               </div>
             )}
+            {/* Dark / Light mode toggle */}
+            <button
+              onClick={toggleDarkMode}
+              title={darkMode ? "Switch to light mode" : "Switch to dark mode"}
+              className="ml-1 p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-700 transition-colors"
+            >
+              {darkMode ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
           </div>
         </div>
       </nav>
@@ -3638,7 +4221,7 @@ ${printStyle}</style></head><body>
         )}
 
         {/* Year selector — hidden on Kit tab */}
-        <div className={`flex items-center gap-2 flex-wrap ${activeTab === "kit" || activeTab === "calendar" ? "hidden" : ""}`}>
+        <div className={`flex items-center gap-2 flex-wrap ${activeTab === "kit" || activeTab === "calendar" || activeTab === "tax" ? "hidden" : ""}`}>
           <span className="text-xs font-bold text-slate-400 uppercase tracking-wider mr-1">Year</span>
           {allYears.map(yr => (
             <button key={yr} onClick={() => setSelectedYear(yr)}
@@ -3672,6 +4255,9 @@ ${printStyle}</style></head><body>
             </button>
             <button onClick={() => { setActiveTab("calendar"); setSearchQuery(""); }} className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "calendar" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
               <Calendar size={14} className="inline mr-1.5 -mt-0.5" />Calendar
+            </button>
+            <button onClick={() => { setActiveTab("tax"); setSearchQuery(""); }} className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "tax" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
+              <Calculator size={14} className="inline mr-1.5 -mt-0.5" />Tax Est.
             </button>
           </div>
           <div className="relative flex-1 min-w-[200px] max-w-xs">
@@ -3882,8 +4468,8 @@ ${printStyle}</style></head><body>
                     <Button variant="outline" onClick={() => setShowNewJobForm(true)} className="h-8 text-xs"><Plus size={13} className="mr-1" />New Job</Button>
                   )}
                   <Button variant="outline" onClick={() => {
-                    const header = ["Invoice #", "Date", "Due Date", "Company", "Job", "Amount", "Received", "Status"];
-                    const rows = filteredInvoices.map(i => [i.invoiceNumber || "", i.date || "", i.dueDate || "", i.company || "", i.jobId ? (jobs.find(j => j.id === i.jobId)?.name || i.jobId) : "", i.amount || 0, i.amountReceived || 0, computeInvoiceStatus(i)]);
+                    const header = ["Invoice #", "Date", "Due Date", "Company", "Job", "Amount", "Received", "Payment Date", "Payment Method", "Status"];
+                    const rows = filteredInvoices.map(i => [i.invoiceNumber || "", i.date || "", i.dueDate || "", i.company || "", i.jobId ? (jobs.find(j => j.id === i.jobId)?.name || i.jobId) : "", i.amount || 0, i.amountReceived || 0, i.paymentDate || "", i.paymentMethod || "", computeInvoiceStatus(i)]);
                     downloadCSV([header, ...rows], `invoices_${selectedYear}.csv`);
                   }} className="h-8 text-xs gap-1.5"><FileDown size={13} />CSV</Button>
                 </div>
@@ -4062,23 +4648,51 @@ ${printStyle}</style></head><body>
                                           </p>
                                         )}
                                       </div>
-                                      {/* Amount Received (Partial Payment) */}
-                                      <div className="space-y-1">
-                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Amount Received ($)</label>
-                                        <Input
-                                          type="number"
-                                          value={item.amountReceived || ""}
-                                          disabled={!!item.locked}
-                                          placeholder="0.00"
-                                          onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], amountReceived: e.target.value }; setInvoices(n); }}
-                                        />
-                                        {effectiveStatus === "Partially Paid" && (
-                                          <p className="text-[11px] text-orange-600 font-semibold">
-                                            Balance owed: ${amountOwed.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                            {lateFee > 0 ? ` + $${lateFee.toLocaleString(undefined, { minimumFractionDigits: 2 })} late fee` : ""}
-                                          </p>
-                                        )}
-                                      </div>
+                                      {/* Payment History */}
+                                      {(() => {
+                                        const pmts = item.payments || [];
+                                        const ML = { ach: "ACH/Wire", check: "Check", cash: "Cash", paypal: "PayPal", zelle: "Zelle", venmo: "Venmo", other: "Other" };
+                                        return (
+                                          <div className="space-y-1.5">
+                                            <div className="flex items-center justify-between">
+                                              <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><CreditCard size={10} />Payment History</label>
+                                              {amountReceived > 0 && <span className="text-[10px] text-slate-400">${amountReceived.toLocaleString(undefined,{minimumFractionDigits:2})} of ${(parseFloat(item.amount)||0).toLocaleString(undefined,{minimumFractionDigits:2})}</span>}
+                                            </div>
+                                            {pmts.length > 0 ? (
+                                              <div className="space-y-1">
+                                                {pmts.map(pmt => (
+                                                  <div key={pmt.id} className="flex items-center gap-2 px-2.5 py-1.5 bg-emerald-50 border border-emerald-100 rounded-lg text-xs">
+                                                    <span className="font-mono text-slate-500 shrink-0">{pmt.date}</span>
+                                                    <span className="font-bold text-emerald-700 flex-1">${(parseFloat(pmt.amount)||0).toLocaleString(undefined,{minimumFractionDigits:2})}</span>
+                                                    {pmt.method && <span className="text-[9px] bg-emerald-100 text-emerald-600 border border-emerald-200 px-1.5 py-0.5 rounded font-medium">{ML[pmt.method]||pmt.method}</span>}
+                                                    {!item.locked && (
+                                                      <button onClick={() => {
+                                                        const newPmts = pmts.filter(p => p.id !== pmt.id);
+                                                        const newTotal = newPmts.reduce((a,p) => a+(parseFloat(p.amount)||0), 0);
+                                                        const n = [...invoices]; n[idx] = { ...n[idx], payments: newPmts, amountReceived: newTotal, status: newTotal <= 0 ? "Unpaid" : newTotal >= (parseFloat(item.amount)||0) ? "Paid" : "Partially Paid" }; setInvoices(n);
+                                                      }} className="text-slate-300 hover:text-red-400 transition-colors shrink-0" title="Remove payment"><Trash2 size={11} /></button>
+                                                    )}
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            ) : parseFloat(item.amountReceived) > 0 ? (
+                                              <div className="flex items-center gap-2 px-2.5 py-1.5 bg-emerald-50 border border-emerald-100 rounded-lg text-xs">
+                                                {item.paymentDate && <span className="font-mono text-slate-500 shrink-0">{item.paymentDate}</span>}
+                                                <span className="font-bold text-emerald-700 flex-1">${(parseFloat(item.amountReceived)||0).toLocaleString(undefined,{minimumFractionDigits:2})}</span>
+                                                {item.paymentMethod && <span className="text-[9px] bg-emerald-100 text-emerald-600 border border-emerald-200 px-1.5 py-0.5 rounded font-medium">{ML[item.paymentMethod]||item.paymentMethod}</span>}
+                                              </div>
+                                            ) : (
+                                              <p className="text-[11px] text-slate-400 italic">No payments recorded yet.</p>
+                                            )}
+                                            {effectiveStatus === "Partially Paid" && (
+                                              <p className="text-[11px] text-orange-600 font-semibold">
+                                                Balance owed: ${amountOwed.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                                {lateFee > 0 ? ` + $${lateFee.toLocaleString(undefined, { minimumFractionDigits: 2 })} late fee` : ""}
+                                              </p>
+                                            )}
+                                          </div>
+                                        );
+                                      })()}
                                     </div>
                                   </div>
                                   <div className="p-3 bg-slate-50 border-t border-slate-100 flex gap-2">
@@ -4086,9 +4700,15 @@ ${printStyle}</style></head><body>
                                       <Eye size={15} className="mr-1.5" /> View
                                     </Button>
                                     {effectiveStatus !== "Paid" ? (
-                                      <Button variant="success" className="flex-1" onClick={() => { const n = [...invoices]; n[idx] = { ...n[idx], status: "Paid", amountReceived: n[idx].amount }; setInvoices(n); }}>Mark as Paid</Button>
+                                      <Button variant="success" className="flex-1" onClick={() => {
+                                        setMarkPaidModal({ id: item.id, idx, amount: parseFloat(item.amount) || 0, existingPayments: item.payments || [] });
+                                        setMarkPaidMode(null);
+                                        setMarkPaidPartialAmt("");
+                                        setMarkPaidDate(new Date().toISOString().split("T")[0]);
+                                        setMarkPaidMethod("");
+                                      }}>Mark as Paid</Button>
                                     ) : (
-                                      <Button variant="outline" className="flex-1 text-emerald-600 border-emerald-200 hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-colors group" onClick={() => { const n = [...invoices]; n[idx] = { ...n[idx], status: "Unpaid", amountReceived: 0 }; setInvoices(n); }} title="Click to mark as unpaid">
+                                      <Button variant="outline" className="flex-1 text-emerald-600 border-emerald-200 hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-colors group" onClick={() => { const n = [...invoices]; n[idx] = { ...n[idx], status: "Unpaid", amountReceived: 0, payments: [] }; setInvoices(n); }} title="Click to mark as unpaid">
                                         <CheckCircle size={15} className="mr-1.5 group-hover:hidden" />
                                         <X size={15} className="mr-1.5 hidden group-hover:inline" />
                                         <span className="group-hover:hidden">Paid</span>
@@ -4667,7 +5287,7 @@ ${printStyle}</style></head><body>
                                     {/* Card header */}
                                     <div className="p-4 space-y-2">
                                       <div className="flex justify-between items-start">
-                                        <div className={`px-2.5 py-1 rounded-md text-xs font-bold uppercase tracking-wider ${entry.status === "Paid" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{entry.status}</div>
+                                        <div className={`px-2.5 py-1 rounded-md text-xs font-bold uppercase tracking-wider ${entry.status === "Paid" ? "bg-emerald-100 text-emerald-700" : entry.status === "Partially Paid" ? "bg-orange-100 text-orange-700" : "bg-amber-100 text-amber-700"}`}>{entry.status}</div>
                                         <div className="flex items-center gap-1">
                                           <button
                                             onClick={() => { const n = [...timecards]; n[idx] = { ...n[idx], locked: !n[idx].locked }; setTimecards(n); }}
@@ -4798,6 +5418,43 @@ ${printStyle}</style></head><body>
                                       </div>
                                     )}
                                   </div>
+                                  {/* Payment History */}
+                                  {(() => {
+                                    const pmts = entry.payments || [];
+                                    const tcAmtRcvd = pmts.length > 0 ? pmts.reduce((a, p) => a + (parseFloat(p.amount) || 0), 0) : (parseFloat(entry.amountReceived) || 0);
+                                    const tcTotal = parseFloat(entry.total) || 0;
+                                    const ML = { ach: "ACH/Wire", check: "Check", cash: "Cash", paypal: "PayPal", zelle: "Zelle", venmo: "Venmo", other: "Other" };
+                                    if (pmts.length === 0 && tcAmtRcvd === 0 && entry.status !== "Partially Paid") return null;
+                                    return (
+                                      <div className="px-4 pb-3 space-y-1.5">
+                                        <div className="flex items-center justify-between">
+                                          <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><CreditCard size={10} />Payment History</label>
+                                          {tcAmtRcvd > 0 && <span className="text-[10px] text-slate-400">${tcAmtRcvd.toLocaleString(undefined,{minimumFractionDigits:2})} of ${tcTotal.toLocaleString(undefined,{minimumFractionDigits:2})}</span>}
+                                        </div>
+                                        {pmts.length > 0 ? (
+                                          <div className="space-y-1">
+                                            {pmts.map(pmt => (
+                                              <div key={pmt.id} className="flex items-center gap-2 px-2.5 py-1.5 bg-emerald-50 border border-emerald-100 rounded-lg text-xs">
+                                                <span className="font-mono text-slate-500 shrink-0">{pmt.date}</span>
+                                                <span className="font-bold text-emerald-700 flex-1">${(parseFloat(pmt.amount)||0).toLocaleString(undefined,{minimumFractionDigits:2})}</span>
+                                                {pmt.method && <span className="text-[9px] bg-emerald-100 text-emerald-600 border border-emerald-200 px-1.5 py-0.5 rounded font-medium">{ML[pmt.method]||pmt.method}</span>}
+                                                {!entry.locked && (
+                                                  <button onClick={() => {
+                                                    const newPmts = pmts.filter(p => p.id !== pmt.id);
+                                                    const newTotal2 = newPmts.reduce((a,p) => a+(parseFloat(p.amount)||0), 0);
+                                                    const n = [...timecards]; n[idx] = { ...n[idx], payments: newPmts, amountReceived: newTotal2, status: newTotal2 <= 0 ? "Unpaid" : newTotal2 >= tcTotal ? "Paid" : "Partially Paid" }; setTimecards(n);
+                                                  }} className="text-slate-300 hover:text-red-400 transition-colors shrink-0" title="Remove payment"><Trash2 size={11} /></button>
+                                                )}
+                                              </div>
+                                            ))}
+                                          </div>
+                                        ) : null}
+                                        {entry.status === "Partially Paid" && (
+                                          <p className="text-[11px] text-orange-600 font-semibold">Balance owed: ${Math.max(0, tcTotal - tcAmtRcvd).toLocaleString(undefined,{minimumFractionDigits:2})}</p>
+                                        )}
+                                      </div>
+                                    );
+                                  })()}
                                   <div className="p-3 bg-slate-50 border-t border-slate-100 flex gap-2 flex-wrap">
                                     <Button variant="outline" className="flex-none" title={entry.locked ? "Unlock entry to edit" : "Edit timecard"} disabled={!!entry.locked}
                                       onClick={() => setEditingTimecard({ ...entry, rate: String(entry.rate), guarHours: String(entry.guarHours || ""), dayRate: String(entry.dayRate || ""), dayRateType: entry.dayRateType || "10", weekEnding: entry.date, days: entry.days?.length ? entry.days.map(d => ({ ...d })) : initWeekDays(entry.date) })}>
@@ -4815,9 +5472,15 @@ ${printStyle}</style></head><body>
                                       </Button>
                                     )}
                                     {entry.status !== "Paid" ? (
-                                      <Button variant="success" className="flex-1" onClick={() => { const n = [...timecards]; n[idx] = { ...n[idx], status: "Paid" }; setTimecards(n); }}>Mark as Paid</Button>
+                                      <Button variant="success" className="flex-1" onClick={() => {
+                                        setMarkPaidModal({ type: "timecard", id: entry.id, idx, amount: parseFloat(entry.total) || 0, existingPayments: entry.payments || [] });
+                                        setMarkPaidMode(null);
+                                        setMarkPaidPartialAmt("");
+                                        setMarkPaidDate(new Date().toISOString().split("T")[0]);
+                                        setMarkPaidMethod("");
+                                      }}>Mark as Paid</Button>
                                     ) : (
-                                      <Button variant="outline" className="flex-1 text-emerald-600 border-emerald-200 hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-colors group" onClick={() => { const n = [...timecards]; n[idx] = { ...n[idx], status: "Unpaid" }; setTimecards(n); }} title="Click to mark as unpaid">
+                                      <Button variant="outline" className="flex-1 text-emerald-600 border-emerald-200 hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-colors group" onClick={() => { const n = [...timecards]; n[idx] = { ...n[idx], status: "Unpaid", amountReceived: 0, payments: [] }; setTimecards(n); }} title="Click to mark as unpaid">
                                         <CheckCircle size={16} className="mr-1.5 group-hover:hidden" />
                                         <X size={16} className="mr-1.5 hidden group-hover:inline" />
                                         <span className="group-hover:hidden">Paid</span>
@@ -4892,25 +5555,61 @@ ${printStyle}</style></head><body>
               </Card>
             </div>
 
-            {/* Sub-tabs */}
-            <div className="flex gap-1 bg-slate-100 p-1 rounded-xl w-fit">
-              <button onClick={() => { setPurchaseSubTab("expendables"); setNewPurchase(p => ({ ...p, category: "expendables" })); }}
-                className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${purchaseSubTab === "expendables" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                <Package size={14} className="inline mr-1.5 -mt-0.5" />Expendables
-              </button>
-              <button onClick={() => { setPurchaseSubTab("equipment"); setNewPurchase(p => ({ ...p, category: "equipment" })); }}
-                className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${purchaseSubTab === "equipment" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                <Wrench size={14} className="inline mr-1.5 -mt-0.5" />Equipment
-              </button>
+            {/* Sub-tabs + Tax Report */}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
+                <button onClick={() => { setPurchaseSubTab("expendables"); setNewPurchase(p => ({ ...p, category: "expendables" })); }}
+                  className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${purchaseSubTab === "expendables" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
+                  <Package size={14} className="inline mr-1.5 -mt-0.5" />Expendables
+                </button>
+                <button onClick={() => { setPurchaseSubTab("equipment"); setNewPurchase(p => ({ ...p, category: "equipment" })); }}
+                  className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${purchaseSubTab === "equipment" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
+                  <Wrench size={14} className="inline mr-1.5 -mt-0.5" />Equipment
+                </button>
+                <button onClick={() => { setPurchaseSubTab("meals"); setNewPurchase(p => ({ ...p, category: "meals" })); }}
+                  className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${purchaseSubTab === "meals" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
+                  <Utensils size={14} className="inline mr-1.5 -mt-0.5" />Meals
+                </button>
+              </div>
+              {filteredPurchases.filter(p => p.category === purchaseSubTab).length > 0 && (
+                <div className="flex items-center gap-2">
+                  <Button onClick={() => {
+                    const items = filteredPurchases.filter(p => p.category === purchaseSubTab);
+                    const header = purchaseSubTab === "meals"
+                      ? ["Date", "Description", "Vendor", "Meal Type", "Amount ($)", "Job", "Notes"]
+                      : purchaseSubTab === "equipment"
+                      ? ["Date", "Description", "Vendor", "Serial #", "Depreciation Method", "Life / Asset Class", `${selectedYear} Deduction ($)`, "Amount ($)", "Job", "Notes"]
+                      : ["Date", "Description", "Vendor", "Amount ($)", "Job", "Notes"];
+                    const rows = items.map(p => {
+                      const base = [p.date || "", p.name || "", p.vendor || ""];
+                      if (purchaseSubTab === "meals") return [...base, p.mealType === "travel_dining" ? "Travel Dining" : "Business Meeting", p.amount || 0, p.jobId ? (jobs.find(j => j.id === p.jobId)?.name || p.jobId) : "", p.notes || ""];
+                      if (purchaseSubTab === "equipment") {
+                        const method = p.depreciationMethod || "section179";
+                        const methodLabel = { "section179": "Section 179", "bonus": "Bonus Depreciation", "straight-line": "Straight-Line", "macrs": "MACRS" }[method] || method;
+                        const lifeClass = method === "straight-line" ? (p.usefulLife ? p.usefulLife + " yr" : "—") : method === "macrs" ? (p.macrsClass || "—") : "—";
+                        const deduction = calcEquipDeduction(p, selectedYear);
+                        return [...base, p.serial || "", methodLabel, lifeClass, deduction > 0 ? deduction.toFixed(2) : "0.00", p.amount || 0, p.jobId ? (jobs.find(j => j.id === p.jobId)?.name || p.jobId) : "", p.notes || ""];
+                      }
+                      return [...base, p.amount || 0, p.jobId ? (jobs.find(j => j.id === p.jobId)?.name || p.jobId) : "", p.notes || ""];
+                    });
+                    downloadCSV([header, ...rows], `${purchaseSubTab}_${selectedYear}.csv`);
+                  }} variant="outline" className="gap-1.5 border-slate-300 text-slate-600 hover:bg-slate-50">
+                    <FileDown size={14} />CSV
+                  </Button>
+                  <Button onClick={() => generateExpenseReport(purchaseSubTab)} className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white">
+                    <Receipt size={14} />Receipts PDF
+                  </Button>
+                </div>
+              )}
             </div>
 
             {/* Add purchase form */}
             <Card className="p-6">
-              <h3 className="text-base font-bold mb-4">Log {purchaseSubTab === "expendables" ? "Expendable" : "Equipment"} Purchase</h3>
+              <h3 className="text-base font-bold mb-4">Log {purchaseSubTab === "expendables" ? "Expendable" : purchaseSubTab === "meals" ? "Meal" : "Equipment"} Purchase</h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
                 <div className="space-y-1 lg:col-span-2">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Item Name</label>
-                  <Input value={newPurchase.name} onChange={e => setNewPurchase(p => ({ ...p, name: e.target.value }))} placeholder={purchaseSubTab === "expendables" ? "e.g. Gels, tape, batteries" : "e.g. Camera, lens, tripod"} />
+                  <Input value={newPurchase.name} onChange={e => setNewPurchase(p => ({ ...p, name: e.target.value }))} placeholder={purchaseSubTab === "expendables" ? "e.g. Gels, tape, batteries" : purchaseSubTab === "meals" ? "e.g. Client lunch, team dinner" : "e.g. Camera, lens, tripod"} />
                 </div>
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Vendor</label>
@@ -4928,10 +5627,22 @@ ${printStyle}</style></head><body>
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Notes (optional)</label>
                   <Input value={newPurchase.notes} onChange={e => setNewPurchase(p => ({ ...p, notes: e.target.value }))} placeholder="Any extra details" />
                 </div>
-                <div className="space-y-1 sm:col-span-2">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Serial Number (optional)</label>
-                  <Input value={newPurchase.serial} onChange={e => setNewPurchase(p => ({ ...p, serial: e.target.value }))} placeholder="e.g. SN123456789" className="font-mono" />
-                </div>
+                {purchaseSubTab === "meals" && (
+                  <div className="space-y-1 sm:col-span-2">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Meal Type</label>
+                    <select value={newPurchase.mealType} onChange={e => setNewPurchase(p => ({ ...p, mealType: e.target.value }))}
+                      className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                      <option value="business_meeting">Business Meeting</option>
+                      <option value="travel_dining">Travel Dining</option>
+                    </select>
+                  </div>
+                )}
+                {purchaseSubTab !== "meals" && (
+                  <div className="space-y-1 sm:col-span-2">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Serial Number (optional)</label>
+                    <Input value={newPurchase.serial} onChange={e => setNewPurchase(p => ({ ...p, serial: e.target.value }))} placeholder="e.g. SN123456789" className="font-mono" />
+                  </div>
+                )}
                 <div className="space-y-1 lg:col-span-2">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Job</label>
                   <select value={newPurchase.jobId} onChange={e => setNewPurchase(p => ({ ...p, jobId: e.target.value }))}
@@ -4956,7 +5667,7 @@ ${printStyle}</style></head><body>
             <div className="space-y-2">
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <h3 className="text-xl font-bold">
-                  {purchaseSubTab === "expendables" ? <><Package size={18} className="inline mr-2 -mt-0.5 text-rose-500" />Expendables</> : <><Wrench size={18} className="inline mr-2 -mt-0.5 text-violet-600" />Equipment</>}
+                  {purchaseSubTab === "expendables" ? <><Package size={18} className="inline mr-2 -mt-0.5 text-rose-500" />Expendables</> : purchaseSubTab === "meals" ? <><Utensils size={18} className="inline mr-2 -mt-0.5 text-amber-500" />Meals</> : <><Wrench size={18} className="inline mr-2 -mt-0.5 text-violet-600" />Equipment</>}
                   <span className="ml-2 text-slate-400 font-normal text-base">— {selectedYear}</span>
                 </h3>
                 <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg">
@@ -4972,8 +5683,8 @@ ${printStyle}</style></head><body>
                 </div>
               </div>
               {(() => {
-                const activeItems = purchaseSubTab === "expendables" ? filteredExpendables : filteredEquipment;
-                const accentColor = purchaseSubTab === "expendables" ? "text-rose-600" : "text-violet-600";
+                const activeItems = purchaseSubTab === "expendables" ? filteredExpendables : purchaseSubTab === "meals" ? filteredMeals : filteredEquipment;
+                const accentColor = purchaseSubTab === "expendables" ? "text-rose-600" : purchaseSubTab === "meals" ? "text-amber-600" : "text-violet-600";
 
                 const groups = purchaseGroupBy === "vendor"
                   ? (() => {
@@ -4996,7 +5707,7 @@ ${printStyle}</style></head><body>
                   return (
                     <div className="py-20 text-center bg-white border-2 border-dashed border-slate-200 rounded-2xl">
                       <div className="bg-slate-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300">
-                        {purchaseSubTab === "expendables" ? <Package size={32} /> : <Wrench size={32} />}
+                        {purchaseSubTab === "expendables" ? <Package size={32} /> : purchaseSubTab === "meals" ? <Utensils size={32} /> : <Wrench size={32} />}
                       </div>
                       <h4 className="text-slate-900 font-semibold">{sq ? `No ${purchaseSubTab} match "${sq}"` : `No ${purchaseSubTab} logged for ${selectedYear}`}</h4>
                       <p className="text-slate-500 text-sm">{sq ? "Try a different search term." : "Use the form above to add your first entry."}</p>
@@ -5015,10 +5726,11 @@ ${printStyle}</style></head><body>
                           <div className="flex items-center gap-1.5">
                             <select value={p.category} onChange={e => upd("category", e.target.value)} disabled={isLocked}
                               className={`text-[10px] font-bold uppercase tracking-wider border rounded px-2 py-0.5 focus:outline-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
-                                p.category === "expendables" ? "bg-rose-100 text-rose-700 border-rose-200" : "bg-violet-100 text-violet-700 border-violet-200"
+                                p.category === "expendables" ? "bg-rose-100 text-rose-700 border-rose-200" : p.category === "meals" ? "bg-amber-100 text-amber-700 border-amber-200" : "bg-violet-100 text-violet-700 border-violet-200"
                               }`}>
                               <option value="expendables">Expendables</option>
                               <option value="equipment">Equipment</option>
+                              <option value="meals">Meals</option>
                             </select>
                             {/* Kit checkbox */}
                             <label className={`flex items-center gap-1 px-2 py-0.5 rounded border cursor-pointer text-[10px] font-bold uppercase tracking-wider transition-colors ${
@@ -5067,10 +5779,82 @@ ${printStyle}</style></head><body>
                           <label className="text-[10px] font-bold text-slate-400 uppercase">Notes</label>
                           <Input value={p.notes || ""} placeholder="Optional notes" disabled={isLocked} onChange={e => upd("notes", e.target.value)} />
                         </div>
-                        <div className="space-y-1">
-                          <label className="text-[10px] font-bold text-slate-400 uppercase">Serial Number</label>
-                          <Input value={p.serial || ""} placeholder="e.g. SN123456789" disabled={isLocked} onChange={e => upd("serial", e.target.value)} className="font-mono" />
-                        </div>
+                        {p.category === "meals" ? (
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase">Meal Type</label>
+                            <select value={p.mealType || "business_meeting"} disabled={isLocked} onChange={e => upd("mealType", e.target.value)}
+                              className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
+                              <option value="business_meeting">Business Meeting</option>
+                              <option value="travel_dining">Travel Dining</option>
+                            </select>
+                          </div>
+                        ) : (
+                          <>
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase">Serial Number</label>
+                            <Input value={p.serial || ""} placeholder="e.g. SN123456789" disabled={isLocked} onChange={e => upd("serial", e.target.value)} className="font-mono" />
+                          </div>
+                          {p.category === "equipment" && (
+                            <div className="space-y-2 pt-2 border-t border-slate-100">
+                              <div className="space-y-1">
+                                <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><Calculator size={10} />Depreciation Method</label>
+                                <select value={p.depreciationMethod || "section179"} disabled={isLocked} onChange={e => upd("depreciationMethod", e.target.value)}
+                                  className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
+                                  <option value="section179">Section 179 — Full deduction year 1</option>
+                                  <option value="bonus">Bonus Depreciation — 100% year 1</option>
+                                  <option value="straight-line">Straight-Line — Spread over useful life</option>
+                                  <option value="macrs">MACRS — IRS half-year tables</option>
+                                </select>
+                              </div>
+                              {(p.depreciationMethod === "straight-line") && (
+                                <div className="space-y-1">
+                                  <label className="text-[10px] font-bold text-slate-400 uppercase">Useful Life (years)</label>
+                                  <select value={p.usefulLife || "5"} disabled={isLocked} onChange={e => upd("usefulLife", e.target.value)}
+                                    className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
+                                    <option value="3">3 years</option>
+                                    <option value="5">5 years</option>
+                                    <option value="7">7 years</option>
+                                    <option value="10">10 years</option>
+                                    <option value="15">15 years</option>
+                                  </select>
+                                </div>
+                              )}
+                              {(p.depreciationMethod === "macrs") && (
+                                <div className="space-y-1">
+                                  <label className="text-[10px] font-bold text-slate-400 uppercase">MACRS Asset Class</label>
+                                  <select value={p.macrsClass || "5yr"} disabled={isLocked} onChange={e => upd("macrsClass", e.target.value)}
+                                    className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
+                                    <option value="3yr">3-year (small tools, tractors)</option>
+                                    <option value="5yr">5-year (cameras, computers, cars)</option>
+                                    <option value="7yr">7-year (office furniture, equipment)</option>
+                                    <option value="10yr">10-year (certain manufacturing equip)</option>
+                                    <option value="15yr">15-year (land improvements)</option>
+                                  </select>
+                                </div>
+                              )}
+                              {(p.depreciationMethod === "straight-line" || p.depreciationMethod === "macrs") && p.date && parseFloat(p.amount) > 0 && (
+                                <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+                                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Depreciation Schedule</p>
+                                  {(() => {
+                                    const cost = parseFloat(p.amount) || 0;
+                                    const purchaseYear = parseInt(p.date.slice(0, 4), 10);
+                                    const thisYear = new Date().getFullYear();
+                                    const rows = p.depreciationMethod === "macrs"
+                                      ? (MACRS_TABLES[p.macrsClass || "5yr"] || MACRS_TABLES["5yr"]).map((pct, i) => ({ year: purchaseYear + i, amount: cost * pct / 100 }))
+                                      : Array.from({ length: parseInt(p.usefulLife || 5) }, (_, i) => ({ year: purchaseYear + i, amount: cost / parseInt(p.usefulLife || 5) }));
+                                    return rows.map(({ year, amount }) => (
+                                      <div key={year} className={`flex justify-between text-xs py-0.5 ${year === thisYear ? "font-bold" : ""}`}>
+                                        <span className={year === thisYear ? "text-blue-600" : "text-slate-400"}>{year}{year === thisYear ? " ← current" : ""}</span>
+                                        <span className={year === thisYear ? "text-emerald-600 font-mono" : "text-slate-500 font-mono"}>${amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                                      </div>
+                                    ));
+                                  })()}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          </>
+                        )}
                         {/* Kit rental rates — shown only when isKit is checked */}
                         {p.isKit && (
                           <div className="pt-2 border-t border-indigo-100 space-y-2">
@@ -5141,7 +5925,7 @@ ${printStyle}</style></head><body>
                       {isExpanded && (
                         <div className="p-4">
                           {group.items.length === 0 ? (
-                            <p className="text-sm text-slate-400 text-center py-6">No {purchaseSubTab} in this job yet. Select it in the form above.</p>
+                            <p className="text-sm text-slate-400 text-center py-6">No {purchaseSubTab === "meals" ? "meal entries" : purchaseSubTab} in this job yet. Select it in the form above.</p>
                           ) : (
                             <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
                               {group.items.map(p => <PurchaseCard key={p.id} p={p} />)}
@@ -5481,9 +6265,9 @@ ${printStyle}</style></head><body>
 
           const kindStyle = { shoot: "bg-blue-100 text-blue-800", hold: "bg-amber-100 text-amber-800", travel: "bg-purple-100 text-purple-800", "inv-due": "bg-orange-100 text-orange-800", "inv-overdue": "bg-red-100 text-red-800", "inv-paid": "bg-emerald-100 text-emerald-700" };
           const kindDot = { shoot: "🎬", hold: "⏸", travel: "✈", "inv-due": "💰", "inv-overdue": "⚠", "inv-paid": "✓" };
-          const holdTypeStyle = { soft: "bg-pink-100 text-pink-700", hold: "bg-blue-100 text-blue-800", locked: "bg-orange-100 text-orange-800", travel: "bg-purple-100 text-purple-800" };
-          const holdTypeDot = { soft: "✏️", hold: "⏸", locked: "🔒", travel: "✈️" };
-          const holdTypeLabel = { soft: "Soft Hold", hold: "Hold", locked: "Locked", travel: "Travel" };
+          const holdTypeStyle = { soft: "bg-pink-100 text-pink-700", hold: "bg-blue-100 text-blue-800", locked: "bg-orange-100 text-orange-800", travel: "bg-purple-100 text-purple-800", prep: "bg-teal-100 text-teal-800", scout: "bg-cyan-100 text-cyan-800", wrap: "bg-slate-100 text-slate-700" };
+          const holdTypeDot = { soft: "✏️", hold: "⏸", locked: "🔒", travel: "✈️", prep: "🔧", scout: "🚧", wrap: "📦" };
+          const holdTypeLabel = { soft: "Soft Hold", hold: "Hold", locked: "Locked", travel: "Travel", prep: "Prep", scout: "Scout", wrap: "Wrap" };
           const getChipStyle = ev => ev.holdType ? (holdTypeStyle[ev.holdType] || kindStyle.hold) : kindStyle[ev.kind];
           const getChipDot = ev => ev.holdType ? (holdTypeDot[ev.holdType] || kindDot.hold) : kindDot[ev.kind];
 
@@ -5499,9 +6283,9 @@ ${printStyle}</style></head><body>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => { setCalSelectMode(m => !m); setCalSelectedDates([]); }}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors shadow-sm ${calSelectMode ? "bg-amber-500 text-white ring-2 ring-amber-300" : "bg-amber-100 text-amber-800 hover:bg-amber-200"}`}
+                    className={`flex items-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-colors shadow-sm ${calSelectMode ? "bg-amber-500 text-white ring-2 ring-amber-300" : "bg-amber-400 text-white hover:bg-amber-500"}`}
                   >
-                    <span className="text-sm leading-none">⏸</span> {calSelectMode ? "Selecting…" : "Hold Days"}
+                    <span className="text-base leading-none">⏸</span> {calSelectMode ? "Selecting…" : "Add hold and travel days"}
                   </button>
                   <button onClick={nextMonth} className="p-2 rounded-lg hover:bg-slate-100 transition-colors text-slate-600"><ChevronRight size={18} /></button>
                 </div>
@@ -5530,52 +6314,146 @@ ${printStyle}</style></head><body>
                 </div>
               )}
 
-              {/* Day-of-week headers */}
-              <div className="grid grid-cols-7 gap-1 px-0.5">
-                {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(dn => (
-                  <div key={dn} className="text-center text-[10px] font-bold text-slate-400 uppercase tracking-wider py-1">{dn}</div>
-                ))}
-              </div>
+              {/* Two-column layout: calendar left, journal right */}
+              <div className="flex gap-4 items-start">
+                {/* Left: DOW headers + grid */}
+                <div className="flex-1 min-w-0 space-y-2">
+                  {/* Day-of-week headers */}
+                  <div className="grid grid-cols-7 gap-1 px-0.5">
+                    {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(dn => (
+                      <div key={dn} className="text-center text-[10px] font-bold text-slate-400 uppercase tracking-wider py-1">{dn}</div>
+                    ))}
+                  </div>
 
-              {/* Calendar grid */}
-              <div className="grid grid-cols-7 gap-1">
-                {cells.map((cell, ci) => {
-                  const isSelected = cell && selSet.has(cell.iso);
-                  return (
-                    <div
-                      key={ci}
-                      onClick={() => calSelectMode && cell && toggleDate(cell.iso)}
-                      className={`min-h-[88px] rounded-xl border p-1.5 flex flex-col transition-colors ${
-                        cell === null ? "bg-transparent border-transparent" :
-                        isSelected ? "border-amber-500 bg-amber-50 ring-2 ring-amber-400 cursor-pointer" :
-                        calSelectMode ? "border-slate-200 bg-white hover:bg-amber-50 hover:border-amber-300 cursor-pointer" :
-                        cell.iso === today ? "border-blue-400 bg-blue-50 shadow-sm" :
-                        "border-slate-200 bg-white hover:border-blue-200"
-                      }`}
-                    >
-                      {cell && (
-                        <>
-                          <div className={`text-xs font-bold mb-1 self-start w-6 h-6 flex items-center justify-center rounded-full ${
-                            isSelected ? "bg-amber-500 text-white" :
-                            cell.iso === today ? "bg-blue-600 text-white" : "text-slate-600"
-                          }`}>{cell.d}</div>
-                          <div className="space-y-0.5 flex-1">
-                            {cell.evs.slice(0, 3).map((ev, ei) => (
-                              <div key={ei} className={`text-[9px] px-1 py-0.5 rounded truncate font-medium leading-tight flex items-center gap-0.5 ${getChipStyle(ev)}`} title={ev.label + (ev.hours ? ` (${ev.hours}h)` : "") + (ev.amount ? ` · $${(parseFloat(ev.amount)||0).toLocaleString()}` : "")}>
-                                <span className="truncate flex-1">{getChipDot(ev)} {ev.label}</span>
-                                {ev.holdId && !calSelectMode && <button onClick={e => { e.stopPropagation(); setHoldReleaseModal({ holdId: ev.holdId, date: cell.iso }); }} className="shrink-0 opacity-60 hover:opacity-100 ml-0.5 leading-none" title="Release options">&times;</button>}
+                  {/* Calendar grid */}
+                  <div className="grid grid-cols-7 gap-1">
+                    {cells.map((cell, ci) => {
+                      const isSelected = cell && selSet.has(cell.iso);
+                      const notePreview = cell && calendarNotes[cell.iso]
+                        ? calendarNotes[cell.iso].split("\n").filter(l => l.trim()).slice(0, 2)
+                        : null;
+                      return (
+                        <div
+                          key={ci}
+                          onClick={() => {
+                            if (!cell) return;
+                            if (calSelectMode) { toggleDate(cell.iso); return; }
+                            if (calNoteDate === cell.iso) { setCalNoteDate(null); setCalNoteEditing(false); return; }
+                            const existing = calendarNotes[cell.iso] || "";
+                            setCalNoteDate(cell.iso);
+                            setCalNoteEditing(!existing);
+                            setCalNoteDraft(existing);
+                          }}
+                          className={`min-h-[88px] rounded-xl border p-1.5 flex flex-col transition-colors ${
+                            cell === null ? "bg-transparent border-transparent" :
+                            isSelected ? "border-amber-500 bg-amber-50 ring-2 ring-amber-400 cursor-pointer" :
+                            calSelectMode ? "border-slate-200 bg-white hover:bg-amber-50 hover:border-amber-300 cursor-pointer" :
+                            calNoteDate === cell.iso ? "border-blue-500 bg-blue-50 ring-2 ring-blue-300 cursor-pointer" :
+                            cell.iso === today ? "border-blue-400 bg-blue-50 shadow-sm cursor-pointer" :
+                            "border-slate-200 bg-white hover:border-blue-200 cursor-pointer"
+                          }`}
+                        >
+                          {cell && (
+                            <>
+                              <div className="flex items-start justify-between mb-1">
+                                <div className={`text-xs font-bold w-6 h-6 flex items-center justify-center rounded-full shrink-0 ${
+                                  isSelected ? "bg-amber-500 text-white" :
+                                  cell.iso === today ? "bg-blue-600 text-white" : "text-slate-600"
+                                }`}>{cell.d}</div>
+                                {calendarNotes[cell.iso] && <div className="w-1.5 h-1.5 rounded-full bg-blue-400 mt-1 shrink-0" title="Has note" />}
                               </div>
+                              <div className="space-y-0.5 flex-1">
+                                {cell.evs.slice(0, 3).map((ev, ei) => (
+                                  <div key={ei} className={`text-[9px] px-1 py-0.5 rounded truncate font-medium leading-tight flex items-center gap-0.5 ${getChipStyle(ev)}`} title={ev.label + (ev.hours ? ` (${ev.hours}h)` : "") + (ev.amount ? ` · $${(parseFloat(ev.amount)||0).toLocaleString()}` : "")}>
+                                    <span className="truncate flex-1">{getChipDot(ev)} {ev.label}</span>
+                                    {ev.holdId && !calSelectMode && <button onClick={e => { e.stopPropagation(); setHoldReleaseModal({ holdId: ev.holdId, date: cell.iso }); }} className="shrink-0 opacity-60 hover:opacity-100 ml-0.5 leading-none" title="Release options">&times;</button>}
+                                  </div>
+                                ))}
+                                {cell.evs.length > 3 && <div className="text-[9px] text-slate-400 font-medium pl-1">+{cell.evs.length - 3} more</div>}
+                              </div>
+                              {notePreview && (
+                                <div className="mt-1 pt-1 border-t border-blue-100 space-y-0.5">
+                                  {notePreview.map((line, i) => (
+                                    <p key={i} className="text-[8px] text-blue-500 truncate leading-snug">📝 {line}</p>
+                                  ))}
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Right: Journal panel */}
+                {calNoteDate && !calSelectMode && (() => {
+                  const savedNote = calendarNotes[calNoteDate] || "";
+                  const dateLabel = new Date(calNoteDate + "T12:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+                  const dayEvs = eventMap[calNoteDate] || [];
+                  return (
+                    <div className="w-72 shrink-0 sticky top-4">
+                      <Card className="p-4 border-blue-200 !bg-blue-50 space-y-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <h3 className="text-xs font-bold text-blue-800 flex items-center gap-1.5 leading-tight">
+                            <PenLine size={13} />{dateLabel}
+                          </h3>
+                          <button onClick={() => { setCalNoteDate(null); setCalNoteEditing(false); }} className="text-slate-400 hover:text-slate-600 text-lg leading-none shrink-0">&times;</button>
+                        </div>
+                        {dayEvs.length > 0 && (
+                          <div className="flex flex-wrap gap-1">
+                            {dayEvs.map((ev, i) => (
+                              <span key={i} className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium ${getChipStyle(ev)}`}>
+                                {getChipDot(ev)} {ev.label}
+                              </span>
                             ))}
-                            {cell.evs.length > 3 && <div className="text-[9px] text-slate-400 font-medium pl-1">+{cell.evs.length - 3} more</div>}
                           </div>
-                        </>
-                      )}
+                        )}
+                        {calNoteEditing ? (
+                          <>
+                            <textarea
+                              value={calNoteDraft}
+                              onChange={e => setCalNoteDraft(e.target.value)}
+                              placeholder="Write your journal entry…"
+                              rows={8}
+                              autoFocus
+                              className="w-full text-sm border border-blue-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 resize-none"
+                            />
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => {
+                                  if (calNoteDraft.trim()) { setCalendarNotes(prev => ({ ...prev, [calNoteDate]: calNoteDraft })); }
+                                  else { setCalendarNotes(prev => { const n = { ...prev }; delete n[calNoteDate]; return n; }); }
+                                  setCalNoteEditing(false);
+                                }}
+                                className="flex-1 px-3 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+                              >Save</button>
+                              <button
+                                onClick={() => { if (!savedNote) setCalNoteDate(null); setCalNoteEditing(false); setCalNoteDraft(savedNote); }}
+                                className="px-3 py-1.5 text-xs font-semibold border border-blue-300 text-blue-700 hover:bg-blue-100 rounded-lg transition-colors"
+                              >Cancel</button>
+                            </div>
+                          </>
+                        ) : savedNote ? (
+                          <>
+                            <div className="bg-white border border-blue-100 rounded-lg px-3 py-2 text-sm text-slate-700 whitespace-pre-wrap leading-relaxed min-h-[80px]">{savedNote}</div>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => { setCalNoteEditing(true); setCalNoteDraft(savedNote); }}
+                                className="flex-1 px-3 py-1.5 text-xs font-bold bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-lg transition-colors flex items-center justify-center gap-1"
+                              ><Pencil size={11} />Edit</button>
+                              <button
+                                onClick={() => { if (window.confirm("Delete this journal entry?")) { setCalendarNotes(prev => { const n = { ...prev }; delete n[calNoteDate]; return n; }); setCalNoteDate(null); setCalNoteEditing(false); } }}
+                                className="px-3 py-1.5 text-xs font-semibold border border-red-200 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                              >Delete</button>
+                            </div>
+                          </>
+                        ) : null}
+                      </Card>
                     </div>
                   );
-                })}
+                })()}
               </div>
-
-              {/* Week summary bar */}
               {(() => {
                 const weekRows = [];
                 for (let i = 0; i < cells.length; i += 7) {
@@ -5611,9 +6489,10 @@ ${printStyle}</style></head><body>
                 {[{ kind: "shoot", label: "Shoot Day" }, { kind: "inv-due", label: "Payment Due" }, { kind: "inv-overdue", label: "Overdue" }, { kind: "inv-paid", label: "Inv. Paid" }].map(({ kind, label }) => (
                   <span key={kind} className={`text-[10px] px-2.5 py-1 rounded-full font-medium ${kindStyle[kind]}`}>{kindDot[kind]} {label}</span>
                 ))}
-                {["soft", "hold", "locked", "travel"].map(t => (
+                {["soft", "hold", "locked", "travel", "prep", "scout", "wrap"].map(t => (
                   <span key={t} className={`text-[10px] px-2.5 py-1 rounded-full font-medium ${holdTypeStyle[t]}`}>{holdTypeDot[t]} {holdTypeLabel[t]}</span>
                 ))}
+                <span className="text-[10px] px-2.5 py-1 rounded-full font-medium bg-blue-100 text-blue-700">📝 Note</span>
               </div>
 
               {/* Upcoming events */}
@@ -5693,9 +6572,52 @@ ${printStyle}</style></head><body>
                 </button>
               </div>
               {mileageSubTab === "mileage" && allMileageEntries.length > 0 && (
-                <Button onClick={generateMileageReport} className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white">
-                  <FileText size={14} />Generate Tax Report
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button onClick={() => {
+                    const IRS_RATE = selectedYear >= 2025 ? 0.70 : 0.67;
+                    const header = ["Date", "Miles", "Purpose", "Company", "Job", "Vehicle", "Type", `Deduction @ $${IRS_RATE}/mi`];
+                    const rows = allMileageEntries.map(m => [
+                      m.date || "", parseFloat(m.miles) || 0, m.purpose || "", m.company || "",
+                      m.jobId ? (jobs.find(j => j.id === m.jobId)?.name || m.jobId) : "",
+                      m.vehicle || "", m.source || "manual",
+                      ((parseFloat(m.miles) || 0) * IRS_RATE).toFixed(2),
+                    ]);
+                    downloadCSV([header, ...rows], `mileage_${selectedYear}.csv`);
+                  }} variant="outline" className="gap-1.5 border-slate-300 text-slate-600 hover:bg-slate-50">
+                    <FileDown size={14} />CSV
+                  </Button>
+                  <Button onClick={generateMileageReport} className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white">
+                    <FileText size={14} />Tax Report
+                  </Button>
+                </div>
+              )}
+              {mileageSubTab === "vehicle" && filteredVehicleExpenses.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <Button onClick={() => {
+                    const header = ["Date", "Category", "Vehicle", "Odometer (mi)", "Amount ($)", "Notes"];
+                    const rows = filteredVehicleExpenses.map(v => [v.date || "", v.category || "", v.vehicle || "", v.odometer || "", v.amount || 0, v.notes || ""]);
+                    downloadCSV([header, ...rows], `vehicle_expenses_${selectedYear}.csv`);
+                  }} variant="outline" className="gap-1.5 border-slate-300 text-slate-600 hover:bg-slate-50">
+                    <FileDown size={14} />CSV
+                  </Button>
+                  <Button onClick={() => generateExpenseReport("vehicle")} className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white">
+                    <Receipt size={14} />Receipts PDF
+                  </Button>
+                </div>
+              )}
+              {mileageSubTab === "gas" && filteredGasLogs.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <Button onClick={() => {
+                    const header = ["Date", "Vehicle", "Station", "Price/Gallon ($)", "Total Amount ($)", "Notes"];
+                    const rows = filteredGasLogs.map(g => [g.date || "", g.vehicle || "", g.station || "", g.pricePerGallon || "", g.amount || 0, g.notes || ""]);
+                    downloadCSV([header, ...rows], `gas_logs_${selectedYear}.csv`);
+                  }} variant="outline" className="gap-1.5 border-slate-300 text-slate-600 hover:bg-slate-50">
+                    <FileDown size={14} />CSV
+                  </Button>
+                  <Button onClick={() => generateExpenseReport("gas")} className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white">
+                    <Receipt size={14} />Receipts PDF
+                  </Button>
+                </div>
               )}
             </div>
 
@@ -6089,7 +7011,361 @@ ${printStyle}</style></head><body>
             )}
           </>
         )}
+
+        {/* ── Quarterly Tax Estimator Tab ── */}
+        {activeTab === "tax" && (() => {
+          const taxYear = selectedYear;
+          const taxInvoices = invoices.filter(inv => (inv.date || "").startsWith(String(taxYear)));
+
+          const taxGrossInvoiced = taxInvoices.reduce((a, inv) => a + (parseFloat(inv.amount) || 0), 0);
+          const taxIncomeReceived = taxInvoices.reduce((a, inv) => {
+            const s = computeInvoiceStatus(inv);
+            if (s === "Paid") return a + (parseFloat(inv.amount) || 0);
+            return a + (parseFloat(inv.amountReceived) || 0);
+          }, 0);
+          const taxIncomeOutstanding = taxGrossInvoiced - taxIncomeReceived;
+
+          const taxPurchaseItems = purchases.filter(p => (p.date || "").startsWith(String(taxYear)));
+          const taxExpendables = taxPurchaseItems.filter(p => p.category === "expendables").reduce((a, p) => a + (parseFloat(p.amount) || 0), 0);
+          const taxEquipmentItems = taxPurchaseItems.filter(p => p.category === "equipment");
+          const taxEquipment = taxEquipmentItems.reduce((a, p) => a + calcEquipDeduction(p, taxYear), 0);
+          const taxMealsTotal = taxPurchaseItems.filter(p => p.category === "meals").reduce((a, p) => a + (parseFloat(p.amount) || 0), 0);
+          const taxMealsDeductible = taxMealsTotal * 0.5;
+
+          const IRS_RATE = taxYear >= 2025 ? 0.70 : 0.67;
+          const taxManualMiles = mileageLogs.filter(m => (m.date || "").startsWith(String(taxYear))).reduce((a, m) => a + (parseFloat(m.miles) || 0), 0);
+          const taxTimecardMiles = timecards.filter(tc => (tc.date || "").startsWith(String(taxYear))).reduce((a, tc) => a + (parseFloat(tc.mileage) || 0), 0);
+          const taxTotalMiles = taxManualMiles + taxTimecardMiles;
+          const taxMileageDeduction = taxTotalMiles * IRS_RATE;
+
+          const taxGasTotal = gasLogs.filter(g => (g.date || "").startsWith(String(taxYear))).reduce((a, g) => a + (parseFloat(g.amount) || 0), 0);
+          const taxVehicleTotal = vehicleExpenses.filter(v => (v.date || "").startsWith(String(taxYear))).reduce((a, v) => a + (parseFloat(v.amount) || 0), 0);
+
+          const taxTotalDeductions = taxExpendables + taxEquipment + taxMealsDeductible + taxMileageDeduction;
+          const taxNetSEIncome = Math.max(0, taxIncomeReceived - taxTotalDeductions);
+
+          const SS_WAGE_BASE = 176100;
+          const seBase = taxNetSEIncome * 0.9235;
+          const seTaxSS = Math.min(seBase, SS_WAGE_BASE) * 0.124;
+          const seTaxMedicare = seBase * 0.029;
+          const seTax = seTaxSS + seTaxMedicare;
+          const deductibleSE = seTax / 2;
+
+          const agi = taxNetSEIncome - deductibleSE;
+          const STANDARD_DEDUCTION = 14600;
+          const taxableIncome = Math.max(0, agi - STANDARD_DEDUCTION);
+          const TAX_BRACKETS = [
+            { min: 0, max: 11925, rate: 0.10 },
+            { min: 11925, max: 48475, rate: 0.12 },
+            { min: 48475, max: 103350, rate: 0.22 },
+            { min: 103350, max: 197300, rate: 0.24 },
+            { min: 197300, max: 250525, rate: 0.32 },
+            { min: 250525, max: 626350, rate: 0.35 },
+            { min: 626350, max: Infinity, rate: 0.37 },
+          ];
+          let fedTax = 0; let rem = taxableIncome;
+          for (const b of TAX_BRACKETS) { if (rem <= 0) break; const taxable = Math.min(rem, b.max - b.min); fedTax += taxable * b.rate; rem -= taxable; }
+
+          const totalEstTax = seTax + fedTax;
+          const qPayment = totalEstTax / 4;
+          const QUARTERLY = [
+            { label: "Q1 (Jan – Mar)", period: `Jan 1 – Mar 31, ${taxYear}`, due: `April 15, ${taxYear}` },
+            { label: "Q2 (Apr – May)", period: `Apr 1 – May 31, ${taxYear}`, due: `June 15, ${taxYear}` },
+            { label: "Q3 (Jun – Aug)", period: `Jun 1 – Aug 31, ${taxYear}`, due: `September 15, ${taxYear}` },
+            { label: "Q4 (Sep – Dec)", period: `Sep 1 – Dec 31, ${taxYear}`, due: `January 15, ${taxYear + 1}` },
+          ];
+          const fmt = n => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+          return (
+            <div className="space-y-6 pb-8">
+              {/* Year selector */}
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Tax Year</span>
+                {allYears.map(yr => (
+                  <button key={yr} onClick={() => setSelectedYear(yr)}
+                    className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-all border ${
+                      selectedYear === yr
+                        ? "bg-blue-600 text-white border-blue-600 shadow-sm"
+                        : "bg-white text-slate-600 border-slate-200 hover:border-blue-300 hover:text-blue-600"
+                    }`}>
+                    {yr}{yr === new Date().getFullYear() ? " ✦" : ""}
+                  </button>
+                ))}
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold">Quarterly Tax Estimator</h2>
+                <p className="text-sm text-slate-500 mt-0.5">Estimated taxes for <strong>{taxYear}</strong> based on your tracked income &amp; deductions. Uses 2025 IRS rates — consult a tax professional for filing.</p>
+              </div>
+
+              {/* Income + Deductions */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <Card className="p-5 space-y-3">
+                  <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2"><FileText size={14} className="text-blue-500" />Income ({taxYear})</h3>
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">Total Invoiced</span><span className="font-semibold">${fmt(taxGrossInvoiced)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">Total Received (cash basis)</span><span className="font-bold text-emerald-600">${fmt(taxIncomeReceived)}</span></div>
+                    {taxIncomeOutstanding > 0 && <div className="flex justify-between text-sm"><span className="text-slate-400 italic">Still outstanding</span><span className="text-amber-600">${fmt(taxIncomeOutstanding)}</span></div>}
+                  </div>
+                  <p className="text-[11px] text-slate-400 pt-2 border-t border-slate-100">Cash-basis: only counts payments received. Partial payments included.</p>
+                </Card>
+                <Card className="p-5 space-y-3">
+                  <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2"><ShoppingCart size={14} className="text-emerald-500" />Deductions ({taxYear})</h3>
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">Expendables</span><span className="font-semibold text-emerald-700">${fmt(taxExpendables)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">Equipment</span><span className="font-semibold text-emerald-700">${fmt(taxEquipment)}</span></div>
+                    {taxEquipmentItems.some(p => (p.depreciationMethod || "section179") !== "section179" && (p.depreciationMethod || "section179") !== "bonus") && (
+                      <div className="ml-3 space-y-0.5 border-l-2 border-slate-100 pl-2">
+                        {taxEquipmentItems.map(p => { const d = calcEquipDeduction(p, taxYear); return d > 0 ? (
+                          <div key={p.id} className="flex justify-between text-xs text-slate-400">
+                            <span className="truncate max-w-[160px]">{p.name || "Item"} <span className="text-[9px] bg-slate-100 px-1 rounded">{DEPR_LABELS[p.depreciationMethod||"section179"]}</span></span>
+                            <span className="font-mono shrink-0">${fmt(d)}</span>
+                          </div>
+                        ) : null; })}
+                      </div>
+                    )}
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">Meals (50% of ${fmt(taxMealsTotal)})</span><span className="font-semibold text-emerald-700">${fmt(taxMealsDeductible)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">Mileage ({taxTotalMiles.toLocaleString()} mi × ${IRS_RATE}/mi)</span><span className="font-semibold text-emerald-700">${fmt(taxMileageDeduction)}</span></div>
+                    {(taxGasTotal > 0 || taxVehicleTotal > 0) && (
+                      <div className="pt-1 border-t border-slate-100 space-y-1">
+                        <p className="text-[10px] text-slate-400 italic">Not included (covered by standard mileage rate):</p>
+                        {taxGasTotal > 0 && <div className="flex justify-between text-xs text-slate-400"><span>Gas logged</span><span>${fmt(taxGasTotal)}</span></div>}
+                        {taxVehicleTotal > 0 && <div className="flex justify-between text-xs text-slate-400"><span>Vehicle expenses</span><span>${fmt(taxVehicleTotal)}</span></div>}
+                      </div>
+                    )}
+                  </div>
+                  <div className="pt-2 border-t border-slate-100 flex justify-between font-bold text-sm">
+                    <span>Total Deductions</span><span className="text-emerald-700">${fmt(taxTotalDeductions)}</span>
+                  </div>
+                </Card>
+              </div>
+
+              {/* Tax calculation */}
+              <Card className="p-5 space-y-4">
+                <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2"><Calculator size={14} className="text-violet-500" />Tax Calculation (Single Filer Estimate)</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Self-Employment Tax</p>
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">Net SE income</span><span>${fmt(taxNetSEIncome)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">SE base (× 92.35%)</span><span>${fmt(seBase)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">Social Security (12.4%)</span><span>${fmt(seTaxSS)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">Medicare (2.9%)</span><span>${fmt(seTaxMedicare)}</span></div>
+                    <div className="flex justify-between text-sm font-bold pt-1 border-t border-slate-100"><span>SE Tax Total</span><span className="text-red-600">${fmt(seTax)}</span></div>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Federal Income Tax</p>
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">Net SE income</span><span>${fmt(taxNetSEIncome)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">Less ½ SE deduction</span><span>– ${fmt(deductibleSE)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">AGI</span><span>${fmt(agi)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">Standard deduction</span><span>– ${fmt(STANDARD_DEDUCTION)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-slate-500">Taxable income</span><span>${fmt(taxableIncome)}</span></div>
+                    <div className="flex justify-between text-sm font-bold pt-1 border-t border-slate-100"><span>Federal Tax Total</span><span className="text-red-600">${fmt(fedTax)}</span></div>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between bg-red-50 border border-red-200 rounded-xl px-5 py-4">
+                  <div>
+                    <p className="text-[10px] font-bold text-red-400 uppercase tracking-wider">Total Estimated Tax ({taxYear})</p>
+                    <p className="text-3xl font-bold text-red-700 mt-0.5">${fmt(totalEstTax)}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] font-bold text-red-400 uppercase tracking-wider">Per Quarter</p>
+                    <p className="text-2xl font-bold text-red-600">${fmt(qPayment)}</p>
+                  </div>
+                </div>
+              </Card>
+
+              {/* Quarterly schedule */}
+              <Card className="p-5 space-y-4">
+                <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2"><CalendarClock size={14} className="text-orange-500" />Quarterly Payment Schedule</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {QUARTERLY.map((q, i) => {
+                    const isPast = new Date(q.due) < new Date();
+                    return (
+                      <div key={i} className={`rounded-xl border p-4 space-y-1.5 ${isPast ? "border-slate-200 bg-slate-50" : "border-orange-200 bg-orange-50"}`}>
+                        <div className="flex items-center justify-between">
+                          <span className={`text-xs font-bold uppercase tracking-wide ${isPast ? "text-slate-400" : "text-orange-600"}`}>{q.label}</span>
+                          {isPast && <span className="text-[10px] bg-slate-200 text-slate-500 px-2 py-0.5 rounded-full font-medium">Past</span>}
+                        </div>
+                        <p className="text-[11px] text-slate-500">{q.period}</p>
+                        <div className="flex items-center justify-between pt-1">
+                          <div>
+                            <p className="text-[10px] text-slate-400">IRS Due</p>
+                            <p className={`text-sm font-bold ${isPast ? "text-slate-500" : "text-orange-700"}`}>{q.due}</p>
+                          </div>
+                          <p className={`text-xl font-bold ${isPast ? "text-slate-400" : "text-orange-600"}`}>${fmt(qPayment)}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">Pay via <strong>EFTPS</strong> (eftps.gov) or mail Form 1040-ES. Dates are standard IRS deadlines — verify at irs.gov if a date falls on a weekend or holiday. State estimated taxes are separate. This is not tax advice.</p>
+              </Card>
+            </div>
+          );
+        })()}
       </main>
     </div>
+
+    {/* ── Mark as Paid Modal ── */}
+    {markPaidModal && (() => {
+      const existingPmts = markPaidModal.existingPayments || [];
+      const alreadyPaid = existingPmts.reduce((a, p) => a + (parseFloat(p.amount) || 0), 0);
+      const remaining = Math.max(0, markPaidModal.amount - alreadyPaid);
+      const ML = { ach: "ACH/Wire", check: "Check", cash: "Cash", paypal: "PayPal", zelle: "Zelle", venmo: "Venmo", other: "Other" };
+      const doSave = (rawAmt) => {
+        const amt = parseFloat(rawAmt);
+        if (!amt || amt <= 0) return;
+        const newPmt = { id: Date.now().toString(36) + Math.random().toString(36).slice(2), amount: amt, date: markPaidDate, ...(markPaidMethod ? { method: markPaidMethod } : {}) };
+        const newPmts = [...existingPmts, newPmt];
+        const newTotal = newPmts.reduce((a, p) => a + (parseFloat(p.amount) || 0), 0);
+        const newStatus = newTotal >= markPaidModal.amount ? "Paid" : "Partially Paid";
+        if (markPaidModal.type === "timecard") {
+          const n = [...timecards];
+          n[markPaidModal.idx] = { ...n[markPaidModal.idx], payments: newPmts, amountReceived: newTotal, status: newStatus };
+          setTimecards(n);
+        } else {
+          const n = [...invoices];
+          n[markPaidModal.idx] = { ...n[markPaidModal.idx], payments: newPmts, amountReceived: newTotal, status: newStatus };
+          setInvoices(n);
+        }
+        setMarkPaidModal(null);
+      };
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={e => { if (e.target === e.currentTarget) setMarkPaidModal(null); }}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden max-h-[90vh] flex flex-col">
+            <div className="px-6 py-5 border-b border-slate-100 shrink-0">
+              <h2 className="text-base font-bold text-slate-800">Record Payment</h2>
+              <p className="text-xs text-slate-400 mt-0.5">Invoice total: <span className="font-semibold text-slate-600">${markPaidModal.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></p>
+            </div>
+            <div className="px-6 py-5 space-y-3 overflow-y-auto flex-1">
+
+              {/* Prior payments ledger */}
+              {existingPmts.length > 0 && (
+                <div className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-3 space-y-1.5">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Prior Payments</p>
+                  {existingPmts.map((p, i) => (
+                    <div key={p.id} className="flex items-center gap-2 text-xs">
+                      <span className="text-slate-400 w-4 shrink-0 text-right font-mono">{i + 1}.</span>
+                      <span className="font-mono text-slate-500 shrink-0">{p.date}</span>
+                      <span className="font-bold text-emerald-700 flex-1">${(parseFloat(p.amount)||0).toLocaleString(undefined,{minimumFractionDigits:2})}</span>
+                      {p.method && <span className="text-[9px] text-slate-400">{ML[p.method]||p.method}</span>}
+                    </div>
+                  ))}
+                  <div className="pt-1.5 border-t border-slate-200 space-y-0.5">
+                    <div className="flex justify-between text-xs font-bold">
+                      <span className="text-slate-500">Paid so far</span><span className="text-emerald-700">${alreadyPaid.toLocaleString(undefined,{minimumFractionDigits:2})}</span>
+                    </div>
+                    <div className="flex justify-between text-xs font-bold">
+                      <span className="text-slate-500">Remaining</span><span className="text-orange-600">${remaining.toLocaleString(undefined,{minimumFractionDigits:2})}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Step 1 — choose type */}
+              {markPaidMode === null && (
+                <div className="space-y-2">
+                  {!existingPmts.length && <p className="text-sm text-slate-600 font-medium">Was this payment in full or partial?</p>}
+                  <button onClick={() => setMarkPaidMode("full")}
+                    className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border-2 border-emerald-200 bg-emerald-50 hover:border-emerald-400 hover:bg-emerald-100 transition-colors text-left">
+                    <CheckCircle size={18} className="text-emerald-600 shrink-0" />
+                    <div>
+                      <p className="text-sm font-bold text-emerald-700">{existingPmts.length > 0 ? "Pay Remaining Balance" : "Paid in Full"}</p>
+                      <p className="text-xs text-emerald-600">${remaining.toLocaleString(undefined, { minimumFractionDigits: 2 })} received</p>
+                    </div>
+                  </button>
+                  <button onClick={() => setMarkPaidMode("partial")}
+                    className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border-2 border-orange-200 bg-orange-50 hover:border-orange-400 hover:bg-orange-100 transition-colors text-left">
+                    <CreditCard size={18} className="text-orange-500 shrink-0" />
+                    <div>
+                      <p className="text-sm font-bold text-orange-700">Partial Payment</p>
+                      <p className="text-xs text-orange-600">Enter the amount received</p>
+                    </div>
+                  </button>
+                </div>
+              )}
+
+              {/* Step 2 — entry form (shared for both modes) */}
+              {markPaidMode !== null && (
+                <div className="space-y-3">
+                  <button onClick={() => setMarkPaidMode(null)} className="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1"><ChevronLeft size={12} />Back</button>
+
+                  {markPaidMode === "partial" && (
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase">Amount Received ($)</label>
+                      <input type="number" value={markPaidPartialAmt} onChange={e => setMarkPaidPartialAmt(e.target.value)}
+                        placeholder="0.00" min="0.01" step="0.01" autoFocus
+                        className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500" />
+                      {parseFloat(markPaidPartialAmt) > 0 && (
+                        <p className="text-[11px] text-orange-600">Balance after this payment: ${Math.max(0, remaining - parseFloat(markPaidPartialAmt)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+                      )}
+                    </div>
+                  )}
+                  {markPaidMode === "full" && (
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3">
+                      <p className="text-sm font-semibold text-emerald-700">{existingPmts.length > 0 ? "Pay Remaining Balance" : "Mark as Paid in Full"}</p>
+                      <p className="text-xs mt-0.5 text-emerald-600">${remaining.toLocaleString(undefined, { minimumFractionDigits: 2 })} will be recorded as received.</p>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase">Date Received</label>
+                      <input type="date" value={markPaidDate} onChange={e => setMarkPaidDate(e.target.value)}
+                        className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-slate-400 uppercase">Method</label>
+                      <select value={markPaidMethod} onChange={e => setMarkPaidMethod(e.target.value)}
+                        className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
+                        <option value="">— Method —</option>
+                        <option value="ach">ACH / Wire</option>
+                        <option value="check">Check</option>
+                        <option value="cash">Cash</option>
+                        <option value="paypal">PayPal</option>
+                        <option value="zelle">Zelle</option>
+                        <option value="venmo">Venmo</option>
+                        <option value="other">Other</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <button
+                    disabled={markPaidMode === "partial" && (!markPaidPartialAmt || parseFloat(markPaidPartialAmt) <= 0)}
+                    onClick={() => doSave(markPaidMode === "full" ? remaining : markPaidPartialAmt)}
+                    className={`w-full px-4 py-2.5 rounded-xl text-white text-sm font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                      markPaidMode === "full" ? "bg-emerald-600 hover:bg-emerald-700" : "bg-orange-500 hover:bg-orange-600"
+                    }`}>
+                    {markPaidMode === "full" ? (existingPmts.length > 0 ? "Confirm — Pay Remaining" : "Confirm — Paid in Full") : "Save Partial Payment"}
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="px-6 pb-5 shrink-0 border-t border-slate-100 pt-3">
+              <button onClick={() => setMarkPaidModal(null)} className="w-full text-xs text-slate-400 hover:text-slate-600 py-1">Cancel</button>
+            </div>
+          </div>
+        </div>
+      );
+    })()}
+
+    {/* ── Expense Report Overlay ── */}
+    {showReportOverlay && (
+      <div className="fixed inset-0 z-50 flex flex-col bg-white">
+        <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-200 bg-slate-50 shrink-0">
+          <span className="font-semibold text-slate-700 text-sm">Tax Report Preview</span>
+          <div className="flex-1" />
+          <button
+            onClick={() => reportIframeRef.current?.contentWindow?.print()}
+            className="px-4 py-1.5 rounded-lg bg-slate-800 text-white text-sm font-semibold hover:bg-slate-700"
+          >Print / Save PDF</button>
+          <button
+            onClick={() => { setShowReportOverlay(false); reportHtmlRef.current = null; }}
+            className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-sm font-semibold hover:bg-slate-100"
+          >✕ Close</button>
+        </div>
+        <iframe ref={reportIframeRef} className="flex-1 w-full border-0" title="Tax Report" />
+      </div>
+    )}
+    </>
   );
 }
