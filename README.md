@@ -26,17 +26,20 @@
 ### Invoices Dashboard
 ![Invoices dashboard](docs/screenshots/invoices.png)
 
-### Create Invoice (with Logo Upload)
-![Create Invoice modal](docs/screenshots/create-invoice.png)
-
-### Timecards Dashboard
-![Timecards dashboard](docs/screenshots/timecards.png)
-
-### Timecard Entry Form
-![Timecard entry form](docs/screenshots/timecard-form.png)
-
 ### Purchases & Equipment
 ![Purchases tab](docs/screenshots/purchases.png)
+
+### Production Calendar
+![Calendar view](docs/screenshots/calendar.png)
+
+### Calendar Legend (all 7 hold types)
+![Calendar legend](docs/screenshots/calendar-legend.png)
+
+### Mark Days Modal (Hold Type Picker)
+![Hold type modal](docs/screenshots/hold-type-modal.png)
+
+### Quarterly Tax Estimator
+![Tax estimator](docs/screenshots/tax-estimator.png)
 
 ### Mileage & Vehicle Expenses
 ![Mileage tab](docs/screenshots/mileage.png)
@@ -47,8 +50,8 @@
 
 | Platform | Link |
 |----------|------|
-| macOS (Universal — Apple Silicon + Intel) | [Have I Been Paid-1.5.0-universal.dmg](https://github.com/rmendoza050288-coder/have-i-been-paid/releases/latest) |
-| Windows (x64) | [Have I Been Paid Setup 1.5.0.exe](https://github.com/rmendoza050288-coder/have-i-been-paid/releases/latest) |
+| macOS (Universal — Apple Silicon + Intel) | [Have I Been Paid-1.6.0-universal.dmg](https://github.com/rmendoza050288-coder/have-i-been-paid/releases/latest) |
+| Windows (x64) | [Have I Been Paid Setup 1.6.0.exe](https://github.com/rmendoza050288-coder/have-i-been-paid/releases/latest) |
 
 ---
 
@@ -89,7 +92,8 @@
 
 ### � Production Calendar *(v1.5.0)*
 - **Monthly Calendar View** — See all shoot days, hold days, travel days, and invoice due dates at a glance
-- **Color-Coded Events** — 🎬 Shoot days (blue), ⏸ Hold days (amber), ✈ Travel days (purple), 💰 Invoice due (orange), ⚠ Overdue (red), ✓ Paid (green)
+- **7 Hold / Day Types** *(v1.6.0)* — ✏️ Soft Hold, ⏸ Hold, 🔒 Locked, ✈️ Travel, 🔧 Prep, 🚧 Scout, 📦 Wrap — each with distinct colors and labels
+- **Color-Coded Events** — 🎬 Shoot days (blue), hold types (7 colors), 💰 Invoice due (orange), ⚠ Overdue (red), ✓ Paid (green)
 - **Upcoming Events Panel** — Next 8 events across all months shown in a quick-reference list
 - **Month Navigation** — Step through months with Prev/Next controls or jump to Today
 
@@ -180,6 +184,11 @@ All data lives in `offline_files/Have I Been Paid_/data.json` (split by year). U
 ---
 
 ## Changelog
+
+### v1.6.0 — May 31, 2026
+- **Hold Types Expanded** — Added Prep 🔧, Scout 🚧, and Wrap 📦 as new day-type categories alongside Soft Hold, Hold, Locked, and Travel; each has a distinct color, icon, and label in the calendar grid and legend
+- **Depreciation on Equipment Export** — CSV and PDF receipt reports now include Depreciation Method, Life / Asset Class, and the year-specific deduction amount for accountant handoff
+- **App Logo in Header** — Application logo is now displayed in the top navigation bar
 
 ### v1.5.0 — May 29, 2026
 - **Production Calendar** — New Calendar tab showing all timecard days and invoice due dates on a monthly grid with color-coded event chips and an Upcoming Events panel
