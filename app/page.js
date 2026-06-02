@@ -43,549 +43,48 @@ import {
   PenLine,
   CreditCard,
   Receipt,
+  Users,
 } from "lucide-react";
-
-const Card = ({ children, className = "" }) => (
-  <div className={`bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden dark:bg-slate-800 dark:border-slate-700 ${className}`}>
-    {children}
-  </div>
-);
-
-const Button = ({ children, onClick, disabled, variant = "primary", className = "" }) => {
-  const base = "inline-flex items-center justify-center px-4 py-2 text-sm font-medium rounded-lg transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100";
-  const v = {
-    primary: "bg-blue-600 text-white hover:bg-blue-700 shadow-sm",
-    outline: "border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 dark:border-slate-600 dark:text-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600",
-    success: "bg-emerald-600 text-white hover:bg-emerald-700",
-    danger: "text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30",
-    ghost: "text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-700",
-  };
-  return <button onClick={onClick} disabled={disabled} className={`${base} ${v[variant]} ${className}`}>{children}</button>;
-};
-
-const Input = ({ type = "text", value, onChange, placeholder, className = "", disabled = false }) => (
-  <input type={type} value={value} onChange={onChange} placeholder={placeholder} disabled={disabled}
-    className={`flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm transition-all focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-50 dark:bg-slate-700 dark:border-slate-600 dark:text-slate-100 dark:placeholder-slate-500 dark:disabled:bg-slate-800 ${className}`} />
-);
-
-// ── Parse extracted OCR text for invoice fields ──────────────────────────────
-function parseInvoiceText(rawText = "") {
-  // Step 1: Fix OCR-broken dollar amounts  e.g. "$ 4 25.00" → "$425.00", "$ 3,711.46" → "$3,711.46"
-  const text = rawText.replace(/\$\s+([\d][\d ,]*\.\d{2})/g, (_, n) => "$" + n.replace(/\s+/g, ""));
-
-  const TABLE_HEADERS = new Set(["ITEM","DAY","RATE","TOTAL","DESCRIPTION","QTY","QUANTITY","AMOUNT","PRICE","UNIT","DATE","NO","REF"]);
-
-  // ── Invoice number ──
-  let invoiceNumber = "";
-  const invM = text.match(/(?:invoice\s*(?:no\.?|num\.?|number|#))[:\s#]*([A-Z0-9][A-Z0-9\-]{0,20})/i);
-  if (invM) {
-    const candidate = invM[1].trim();
-    if (!TABLE_HEADERS.has(candidate.toUpperCase())) invoiceNumber = candidate;
-  }
-
-  // ── Date ──
-  let date = new Date().toISOString().split("T")[0];
-  const datePatterns = [
-    /(?:invoice\s+date|date|dated?|bill\s+date|issue\s+date)[:\s]+(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/i,
-    /(?:invoice\s+date|date|dated?|bill\s+date|issue\s+date)[:\s]+([A-Za-z]+\s+\d{1,2},?\s+\d{4})/i,
-    /(\d{4}-\d{2}-\d{2})/,
-    /(\d{1,2}\/\d{1,2}\/\d{4})/,
-    /(\d{1,2}\/\d{1,2}\/\d{2})\b/,
-    /([A-Za-z]+ \d{1,2},? \d{4})/,
-  ];
-  for (const p of datePatterns) {
-    const m = text.match(p);
-    if (m) { const d = new Date(m[1]); if (!isNaN(d)) { date = d.toISOString().split("T")[0]; break; } }
-  }
-
-  // ── Amount — prefer TOTAL keyword, take last/largest match ──
-  let amount = 0;
-  const totalMs = [...text.matchAll(/(?:total|amount\s+due|balance\s+due|invoice\s+total|grand\s+total)[^\d$\n]{0,20}\$?([\d,]+(?:\.\d{2})?)/gi)];
-  if (totalMs.length) {
-    const vals = totalMs.map(m => parseFloat(m[1].replace(/,/g, "")));
-    amount = Math.max(...vals);
-  }
-  if (!amount) {
-    // Fallback: largest dollar figure in doc
-    const allD = [...text.matchAll(/\$([\d,]+\.\d{2})/g)].map(m => parseFloat(m[1].replace(/,/g, "")));
-    if (allD.length) amount = Math.max(...allD);
-  }
-
-  // ── Company — find RECIPIENT name, not sender ──
-  let company = "";
-
-  // Strategy 1: After INVOICE header, find "Name:" label whose VALUE is on the NEXT LINE
-  // (common in two-column form PDFs where OCR puts label and value on separate lines)
-  const invoicePos = text.search(/\bINVOICE\b/i);
-  if (invoicePos !== -1) {
-    const afterInvoice = text.slice(invoicePos + 7);
-    const m = afterInvoice.match(/Name:[^\n]*\n[ \t]*([A-Za-z][^\n]{0,50})/i);
-    if (m) {
-      const raw = m[1]
-        .replace(/Address.*/i, "")
-        .replace(/invoice.*/i, "")
-        .replace(/job\s*(?:name)?[:\s].*/i, "")
-        .replace(/Date[:\s].*/i, "")
-        .trim();
-      if (raw.length > 1 && !/^(date|address|phone|job|name|item|day|rate|total|payment|comments|ach|routing|account|office)$/i.test(raw)) {
-        company = raw;
-      }
-    }
-  }
-
-  // Strategy 2: Inline "Name: COMPANY" on same line (classic invoice layout)
-  if (!company) {
-    const nameMatches = [...text.matchAll(/Name[:\s]+([^\n\r]{2,60})/gi)];
-    for (let i = 1; i < nameMatches.length; i++) {
-      const raw = nameMatches[i][1]
-        .replace(/Date[:\s].*/i, "")
-        .replace(/invoice.*/i, "")
-        .replace(/job\s*(?:name)?[:\s].*/i, "")
-        .replace(/\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}.*/,"")
-        .trim();
-      if (raw && raw.length > 1 && !/^(date|address|phone|job|honda|fax|to|from|dear|attn|n\/a)$/i.test(raw)) {
-        company = raw; break;
-      }
-    }
-  }
-
-  // Strategy 3: Explicit customer/client/bill-to keyword
-  if (!company) {
-    const SKIP = /^(job|name|address|date|invoice|to|from|dear|attn)/i;
-    for (const pat of [
-      /(?:bill\s*to|billed?\s*to|client|customer)[:\s]+([^\n]{2,60})/im,
-      /(?:from|vendor|company)[:\s]+([^\n]{2,60})/im,
-    ]) {
-      const m = text.match(pat);
-      if (m) {
-        const candidate = m[1].trim();
-        if (!SKIP.test(candidate) && candidate.length > 1) { company = candidate; break; }
-      }
-    }
-  }
-
-  return { company, amount, date, invoiceNumber };
-}
-
-// ── Parse timecard OCR text ──────────────────────────────────────────────────
-function parseTimecardText(rawText = "") {
-  const text = rawText.replace(/\$\s+([\d][\d ,]*\.\d{2})/g, (_, n) => "$" + n.replace(/\s+/g, ""));
-  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
-
-  // ── Production Company (crew timecard format: "PRODUCTION COMPANY") ──
-  let company = "";
-  for (const pat of [
-    /(?:production\s*company)[:\s]+([^\n]{2,60})/i,
-    /(?:client|company|employer|customer|billed?\s*to)[:\s]+([^\n]{2,60})/i,
-  ]) {
-    const m = text.match(pat);
-    if (m) { company = m[1].replace(/\d{1,2}[\/\-]\d.*/,"").trim(); break; }
-  }
-  if (!company) {
-    const NOISE = /^(timecard|timesheet|time\s*card|time\s*sheet|invoice|date|hours?|rate|total|name|employee|description|week|period|from|to|pay|company|client|phone|email|address|signature|approved)$/i;
-    for (const line of lines.slice(0, 12)) {
-      if (line.length > 1 && line.length < 60 && /[a-zA-Z]/.test(line) && !NOISE.test(line) && !/^\d/.test(line) && !/[@\.\$#]/.test(line)) {
-        company = line; break;
-      }
-    }
-  }
-
-  // ── Job Name (crew timecard: "JOB NAME") ──
-  let jobName = "";
-  const jobNameM = text.match(/(?:job\s*name)[:\s]+([^\n]{2,80})/i);
-  if (jobNameM) {
-    jobName = jobNameM[1]
-      .replace(/production\s*company.*/i, "")
-      .replace(/guar\.?.*/i, "")
-      .replace(/rate.*/i, "")
-      .replace(/week\s*ending.*/i, "")
-      .trim();
-  }
-
-  // ── Job Classification ──
-  let jobClassification = "";
-  const classM = text.match(/(?:job\s*class(?:ification)?)[:\s]+([^\n]{2,60})/i);
-  if (classM) jobClassification = classM[1].replace(/union.*/i,"").replace(/occ.*/i,"").trim();
-
-  // ── Guaranteed Hours ──
-  let guarHours = 0;
-  const guarM = text.match(/(?:guar\.?\s*hours?)[:\s]*([\d]+(?:\.\d+)?)/i);
-  if (guarM) { const v = parseFloat(guarM[1]); if (v > 0 && v <= 24) guarHours = v; }
-
-  // ── Total Hours — sum all daily TOTAL HRS entries ──
-  let hours = 0;
-  // Try labeled total first
-  const totalHrsPatterns = [
-    /(?:total\s*hrs?\.?)[:\s]*([\d]+(?:\.\d+)?)/gi,
-    /(?:total\s*hours?|hours?\s*worked|hours?\s*logged)[:\s]*([\d]+(?:\.\d+)?)/i,
-  ];
-  const allTotalMatches = [...text.matchAll(/(?:total\s*hrs?\.?)[:\s]*([\d]+(?:\.\d+)?)/gi)];
-  if (allTotalMatches.length) {
-    // Sum all daily totals (7-day crew card has one per day)
-    const vals = allTotalMatches.map(m => parseFloat(m[1])).filter(v => v > 0 && v <= 24);
-    if (vals.length) hours = parseFloat(vals.reduce((a, b) => a + b, 0).toFixed(2));
-  }
-  if (!hours) {
-    for (const p of [
-      /(?:total\s*hours?|hours?\s*worked|hours?\s*logged)[:\s]*([\d]+(?:\.\d+)?)/i,
-      /(?:hours?)[:\s]*([\d]+(?:\.\d+)?)/i,
-      /([\d]+(?:\.\d+)?)\s*(?:hrs?|hours?)/i,
-    ]) {
-      const m = text.match(p);
-      if (m) { const v = parseFloat(m[1]); if (v > 0 && v <= 999) { hours = v; break; } }
-    }
-  }
-
-  // ── Overtime breakdown (1X, 1.5X, 2X) ──
-  let hours1x = 0, hours15x = 0, hours2x = 0;
-  const h1xM = text.match(/\b1X[:\s]*([\d]+(?:\.\d+)?)/i);
-  const h15xM = text.match(/\b1\.5X[:\s]*([\d]+(?:\.\d+)?)/i);
-  const h2xM = text.match(/\b2X[:\s]*([\d]+(?:\.\d+)?)/i);
-  if (h1xM) hours1x = parseFloat(h1xM[1]) || 0;
-  if (h15xM) hours15x = parseFloat(h15xM[1]) || 0;
-  if (h2xM) hours2x = parseFloat(h2xM[1]) || 0;
-
-  // ── Rate ──
-  let rate = 0;
-  const ratePatterns = [
-    /(?:hourly\s*rate|rate\s*per\s*hour|pay\s*rate|(?:^|\s)rate)[:\s]*\$?([\d,]+(?:\.\d{2})?)/im,
-    /\$\s*([\d,]+(?:\.\d{2})?)\s*(?:\/\s*(?:hr|hour))/i,
-  ];
-  for (const p of ratePatterns) {
-    const m = text.match(p);
-    if (m) { const v = parseFloat(m[1].replace(/,/g,"")); if (v > 0) { rate = v; break; } }
-  }
-
-  // ── Date — prefer "WEEK ENDING" for crew timecards ──
-  let date = new Date().toISOString().split("T")[0];
-  for (const p of [
-    /(?:week\s*ending)[:\s]+(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/i,
-    /(?:period\s*end(?:ing)?|end\s*date)[:\s]+(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/i,
-    /(?:date)[:\s]+([A-Za-z]+\s+\d{1,2},?\s+\d{4})/i,
-    /(\d{4}-\d{2}-\d{2})/,
-    /(\d{1,2}\/\d{1,2}\/\d{4})/,
-    /(\d{1,2}\/\d{1,2}\/\d{2})\b/,
-  ]) {
-    const m = text.match(p);
-    if (m) { const d = new Date(m[1]); if (!isNaN(d)) { date = d.toISOString().split("T")[0]; break; } }
-  }
-
-  // ── Description / Notes ──
-  let description = "";
-  const descM = text.match(/(?:description|notes?|work\s*performed|task)[:\s]+([^\n]{2,100})/i);
-  if (descM) description = descM[1].trim();
-
-  return { company, jobName, jobClassification, guarHours, hours, hours1x, hours15x, hours2x, rate, date, description };
-}
-
-// ── Parse paystub OCR text ───────────────────────────────────────────────────
-function parsePaystubText(rawText = "") {
-  const text = rawText.replace(/\$\s+([\d][\d ,]*\.\d{2})/g, (_, n) => "$" + n.replace(/\s+/g, ""));
-
-  const findAmount = (patterns) => {
-    for (const p of patterns) {
-      const m = text.match(p);
-      if (m) { const v = parseFloat(m[1].replace(/,/g,"")); if (v > 0) return v; }
-    }
-    return 0;
-  };
-
-  const grossPay = findAmount([
-    /(?:gross\s*(?:pay|earnings?|wages?))[:\s]*\$?([\d,]+(?:\.\d{2})?)/i,
-    /(?:total\s*gross)[:\s]*\$?([\d,]+(?:\.\d{2})?)/i,
-    /(?:gross)[:\s]*\$?([\d,]+(?:\.\d{2})?)/i,
-  ]);
-
-  const netPay = findAmount([
-    /(?:net\s*(?:pay|wages?|earnings?)|take\s*home|net\s*amount)[:\s]*\$?([\d,]+(?:\.\d{2})?)/i,
-    /(?:net)[:\s]*\$?([\d,]+(?:\.\d{2})?)/i,
-  ]);
-
-  let payDate = new Date().toISOString().split("T")[0];
-  for (const p of [
-    /(?:pay\s*date|payment\s*date|check\s*date|paid\s*on)[:\s]+(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/i,
-    /(?:pay\s*date|payment\s*date|check\s*date)[:\s]+([A-Za-z]+\s+\d{1,2},?\s+\d{4})/i,
-    /(?:date)[:\s]+(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/i,
-    /(\d{1,2}\/\d{1,2}\/\d{4})/,
-    /(\d{1,2}\/\d{1,2}\/\d{2})\b/,
-  ]) {
-    const m = text.match(p);
-    if (m) { const d = new Date(m[1]); if (!isNaN(d)) { payDate = d.toISOString().split("T")[0]; break; } }
-  }
-
-  let checkNumber = "";
-  const checkM = text.match(/(?:check\s*(?:no\.?|num\.?|number|#)|payment\s*(?:ref|id|no\.?)|confirmation\s*(?:no\.?|#)?)[:\s#]*([A-Z0-9\-]{3,20})/i);
-  if (checkM) checkNumber = checkM[1].trim();
-
-  let employer = "";
-  for (const p of [
-    /(?:employer|company|from|payer|payor)[:\s]+([^\n]{2,60})/i,
-    /(?:paid\s*by)[:\s]+([^\n]{2,60})/i,
-  ]) {
-    const m = text.match(p);
-    if (m) { employer = m[1].replace(/\d{1,2}[\/\-]\d.*/,"").trim(); break; }
-  }
-
-  return { grossPay, netPay, payDate, checkNumber, employer };
-}
-
-// ── Weekly timecard helpers ──────────────────────────────────────────────────
-const DAY_NAMES = ["SUN","MON","TUE","WED","THU","FRI","SAT"];
-
-function getNextSaturday() {
-  const d = new Date();
-  const diff = (6 - d.getDay() + 7) % 7;
-  d.setDate(d.getDate() + diff);
-  return d.toISOString().split("T")[0];
-}
-
-function initWeekDays(weekEnding) {
-  // weekEnding is the Saturday date string; builds Sun–Sat array
-  const sat = new Date(weekEnding + "T12:00:00");
-  return Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(sat);
-    d.setDate(sat.getDate() - (6 - i));
-    return { date: d.toISOString().split("T")[0], day: DAY_NAMES[d.getDay()], type: "work", call: "", meal1Out: "", meal1In: "", meal2Out: "", meal2In: "", wrap: "", mealPenalty: false, perDiemWork: false, perDiemOff: false, totalHours: 0, hours1x: 0, hours15x: 0, hours2x: 0 };
-  });
-}
-
-function parseTimeToMin(str) {
-  if (!str) return null;
-  const [h, m] = str.split(":").map(Number);
-  if (isNaN(h) || isNaN(m)) return null;
-  return h * 60 + m;
-}
-
-function calcDayHours(day) {
-  const call = parseTimeToMin(day.call), wrap = parseTimeToMin(day.wrap);
-  if (call == null || wrap == null) return 0;
-  let total = wrap - call;
-  if (total <= 0) total += 24 * 60;
-  const m1o = parseTimeToMin(day.meal1Out), m1i = parseTimeToMin(day.meal1In);
-  if (m1o != null && m1i != null && m1i > m1o) total -= (m1i - m1o);
-  const m2o = parseTimeToMin(day.meal2Out), m2i = parseTimeToMin(day.meal2In);
-  if (m2o != null && m2i != null && m2i > m2o) total -= (m2i - m2o);
-  return Math.max(0, parseFloat((total / 60).toFixed(2)));
-}
-
-function calcOTBreakdown(hours) {
-  // Film/TV industry standard: 0–8h straight, 8–12h at 1.5×, 12h+ at 2×
-  if (hours <= 8) return { hours1x: hours, hours15x: 0, hours2x: 0 };
-  if (hours <= 12) return { hours1x: 8, hours15x: parseFloat((hours - 8).toFixed(2)), hours2x: 0 };
-  return { hours1x: 8, hours15x: 4, hours2x: parseFloat((hours - 12).toFixed(2)) };
-}
-
-function calcOTBreakdown6thDay(hours) {
-  // 6th-day premium: first 12h all at 1.5×, beyond 12h at 2×
-  if (hours <= 12) return { hours1x: 0, hours15x: parseFloat(hours.toFixed(2)), hours2x: 0 };
-  return { hours1x: 0, hours15x: 12, hours2x: parseFloat((hours - 12).toFixed(2)) };
-}
-
-function calcOTBreakdown7thDay(hours) {
-  // 7th-day: ALL hours at 2× double time
-  return { hours1x: 0, hours15x: 0, hours2x: parseFloat(hours.toFixed(2)) };
-}
-
-function applyWeekOTRules(days, guarHours) {
-  // Find worked days sorted by date to determine 5th and 6th
-  const worked = days
-    .map((d, i) => ({ i, date: d.date, actualHours: calcDayHours(d) }))
-    .filter(x => x.actualHours > 0)
-    .sort((a, b) => a.date.localeCompare(b.date));
-
-  let sixthDayIdx = null;
-  let seventhDayIdx = null;
-  if (worked.length >= 7) seventhDayIdx = worked[6].i;
-  if (worked.length >= 6) {
-    const day5 = days[worked[4].i];
-    const day6 = days[worked[5].i];
-    sixthDayIdx = worked[5].i;
-    // Check if 36+ hours of rest between day5 wrap and day6 call — if so, treat normally
-    if (day5.wrap && day6.call && day5.date && day6.date) {
-      const wrapMs = new Date(day5.date + "T" + day5.wrap).getTime();
-      const callMs = new Date(day6.date + "T" + day6.call).getTime();
-      if ((callMs - wrapMs) / (1000 * 60 * 60) >= 36) sixthDayIdx = null;
-    }
-  }
-
-  return days.map((d, i) => {
-    const actualHours = calcDayHours(d);
-    const paidHours = actualHours > 0 ? Math.max(actualHours, guarHours) : 0;
-    const breakdown = (i === seventhDayIdx) ? calcOTBreakdown7thDay(paidHours) : (i === sixthDayIdx) ? calcOTBreakdown6thDay(paidHours) : calcOTBreakdown(paidHours);
-    return { ...d, totalHours: actualHours, paidHours, ...breakdown };
-  });
-}
-
-function get6thDayIndex(days) {
-  const worked = days
-    .map((d, i) => ({ i, date: d.date, actualHours: calcDayHours(d) }))
-    .filter(x => x.actualHours > 0)
-    .sort((a, b) => a.date.localeCompare(b.date));
-  if (worked.length < 6) return -1;
-  const day5 = days[worked[4].i];
-  const day6 = days[worked[5].i];
-  if (day5.wrap && day6.call && day5.date && day6.date) {
-    const wrapMs = new Date(day5.date + "T" + day5.wrap).getTime();
-    const callMs = new Date(day6.date + "T" + day6.call).getTime();
-    if ((callMs - wrapMs) / (1000 * 60 * 60) >= 36) return -1;
-  }
-  return worked[5].i;
-}
-
-function get7thDayIndex(days) {
-  const worked = days
-    .map((d, i) => ({ i, date: d.date, actualHours: calcDayHours(d) }))
-    .filter(x => x.actualHours > 0)
-    .sort((a, b) => a.date.localeCompare(b.date));
-  if (worked.length < 7) return -1;
-  return worked[6].i;
-}
-
-// Returns a Set of day indices where turnaround from previous day's wrap is < 10 hours
-function calcTurnaroundViolations(days) {
-  const violations = new Set();
-  for (let i = 1; i < days.length; i++) {
-    const prev = days[i - 1];
-    const curr = days[i];
-    if (!prev.wrap || !curr.call || !prev.date || !curr.date) continue;
-    const wrapMs = new Date(prev.date + "T" + prev.wrap).getTime();
-    const callMs = new Date(curr.date + "T" + curr.call).getTime();
-    if (isNaN(wrapMs) || isNaN(callMs)) continue;
-    const gapHours = (callMs - wrapMs) / 3600000;
-    if (gapHours > 0 && gapHours < 10) violations.add(i);
-  }
-  return violations;
-}
-
-// Returns true if meal penalty should be auto-flagged (>6h worked, no meal break logged)
-function shouldAutoMealPenalty(day) {
-  if (!day.call) return false;
-  const hours = day.totalHours ?? calcDayHours(day);
-  if (hours <= 0) return false;
-  // No meal break recorded at all and worked more than 6 hours
-  if (!day.meal1Out) return hours > 6;
-  // Meal recorded — check if it started within 6 hours of call
-  const toMins = t => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
-  let callMins = toMins(day.call);
-  let mealMins = toMins(day.meal1Out);
-  if (mealMins < callMins) mealMins += 24 * 60; // handle overnight
-  return (mealMins - callMins) > 6 * 60;
-}
-
-// Generates a CSV string from an array of row arrays and triggers a download
-function downloadCSV(rows, filename) {
-  const escape = v => {
-    const s = v == null ? "" : String(v);
-    return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  const csv = rows.map(r => r.map(escape).join(",")).join("\n");
-  const blob = new Blob([csv], { type: "text/csv" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url; a.download = filename; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
-}
-
-const TAX_RATE = 0.25;
-const IRS_MILEAGE_RATE = 0.70; // 2025 IRS standard mileage rate ($/mi)
-
-// ── Depreciation helpers ─────────────────────────────────────────
-const MACRS_TABLES = {
-  "3yr":  [33.33, 44.45, 14.81, 7.41],
-  "5yr":  [20.00, 32.00, 19.20, 11.52, 11.52, 5.76],
-  "7yr":  [14.29, 24.49, 17.49, 12.49, 8.93, 8.92, 8.93, 4.46],
-  "10yr": [10.00, 18.00, 14.40, 11.52, 9.22, 7.37, 6.55, 6.55, 6.56, 6.55, 3.28],
-  "15yr": [5.00, 9.50, 8.55, 7.70, 6.93, 6.23, 5.90, 5.90, 5.91, 5.90, 5.91, 5.90, 5.91, 5.90, 5.91, 2.95],
-};
-const DEPR_LABELS = {
-  "section179": "Sec. 179",
-  "bonus": "Bonus",
-  "straight-line": "SL",
-  "macrs": "MACRS",
-};
-function calcEquipDeduction(p, forYear) {
-  const cost = parseFloat(p.amount) || 0;
-  const method = p.depreciationMethod || "section179";
-  const purchaseYear = p.date ? parseInt(p.date.slice(0, 4), 10) : NaN;
-  if (!cost || isNaN(purchaseYear)) return 0;
-  const yi = forYear - purchaseYear; // 0-based year index
-  if (method === "section179" || method === "bonus") return yi === 0 ? cost : 0;
-  if (method === "straight-line") {
-    const life = parseInt(p.usefulLife, 10) || 5;
-    return yi >= 0 && yi < life ? cost / life : 0;
-  }
-  if (method === "macrs") {
-    const table = MACRS_TABLES[p.macrsClass || "5yr"] || MACRS_TABLES["5yr"];
-    return yi >= 0 && yi < table.length ? cost * (table[yi] / 100) : 0;
-  }
-  return yi === 0 ? cost : 0;
-}
-
-const PAYMENT_TERMS = [
-  { label: "Net 15", days: 15 },
-  { label: "Net 30", days: 30 },
-  { label: "Net 45", days: 45 },
-  { label: "Net 60", days: 60 },
-  { label: "Custom", days: null },
-];
-
-// Calculate due date from invoice date + payment terms
-function dueDateFromTerms(invoiceDate, terms) {
-  const t = PAYMENT_TERMS.find(p => p.label === terms);
-  if (!t || t.days == null) return null;
-  const d = new Date(invoiceDate + "T12:00");
-  if (isNaN(d)) return null;
-  d.setDate(d.getDate() + t.days);
-  return d.toISOString().split("T")[0];
-}
-
-// Calculate late fee for an invoice
-function calcLateFee(inv) {
-  if (!inv.lateFeeType || inv.lateFeeType === "none") return 0;
-  const effectiveStatus = computeInvoiceStatus(inv);
-  if (effectiveStatus === "Paid") return 0;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const defaultDue = inv.dueDate || (() => { const d = new Date(inv.date); d.setDate(d.getDate() + 30); return d.toISOString().split("T")[0]; })();
-  const due = new Date(defaultDue); due.setHours(0, 0, 0, 0);
-  const daysOverdue = Math.max(0, Math.round((today - due) / 86400000));
-  if (daysOverdue === 0) return 0;
-  const amount = parseFloat(inv.amount) || 0;
-  const received = parseFloat(inv.amountReceived) || 0;
-  const balance = Math.max(0, amount - received);
-  if (balance === 0) return 0;
-  if (inv.lateFeeType === "flat") return parseFloat(inv.lateFeeRate) || 0;
-  if (inv.lateFeeType === "daily") {
-    const dailyRate = (parseFloat(inv.lateFeeRate) || 0) / 100;
-    return parseFloat((balance * dailyRate * daysOverdue).toFixed(2));
-  }
-  return 0;
-}
-
-// Derive display status from invoice data (partial payments override manual status)
-function computeInvoiceStatus(inv) {
-  const received = parseFloat(inv.amountReceived) || 0;
-  const total = parseFloat(inv.amount) || 0;
-  if (received > 0 && total > 0 && received >= total) return "Paid";
-  if (received > 0 && received < total) return "Partially Paid";
-  return inv.status || "Unpaid";
-}
-
-// Day rate → hourly rate conversion
-// 10hr guarantee: 8h@1x + 2h@1.5x = 11 × hourly
-// 12hr guarantee: 8h@1x + 4h@1.5x = 14 × hourly
-function dayRateToHourly(dayRate, type) {
-  const dr = parseFloat(dayRate);
-  if (!dr || dr <= 0) return "";
-  const divisor = type === "12" ? 14 : 11;
-  return String(parseFloat((dr / divisor).toFixed(4)));
-}
-const FOLDER_NAME = "Have I Been Paid?";
-
-const SIGNATURE_FONTS = [
-  "Dancing Script", "Tangerine", "Great Vibes", "Satisfy",
-  "Pinyon Script", "Sacramento", "Clicker Script", "Allura",
-  "Alex Brush", "Yellowtail", "Marck Script", "Italianno",
-];
+import { Card, Button, Input } from "./components/ui";
+import CalendarTab from "./components/CalendarTab";
+import KitTab from "./components/KitTab";
+import MileageTab from "./components/MileageTab";
+import TaxTab from "./components/TaxTab";
+import PurchasesTab from "./components/PurchasesTab";
+import TimecardsTab from "./components/TimecardsTab";
+import InvoicesTab from "./components/InvoicesTab";
+import ClientBookTab from "./components/ClientBookTab";
+import {
+  parseInvoiceText,
+  parseTimecardText,
+  parsePaystubText,
+  DAY_NAMES,
+  getNextSaturday,
+  initWeekDays,
+  parseTimeToMin,
+  calcDayHours,
+  calcOTBreakdown,
+  calcOTBreakdown6thDay,
+  calcOTBreakdown7thDay,
+  applyWeekOTRules,
+  get6thDayIndex,
+  get7thDayIndex,
+  calcTurnaroundViolations,
+  shouldAutoMealPenalty,
+  downloadCSV,
+  TAX_RATE,
+  IRS_MILEAGE_RATE,
+  MACRS_TABLES,
+  DEPR_LABELS,
+  calcEquipDeduction,
+  PAYMENT_TERMS,
+  dueDateFromTerms,
+  calcLateFee,
+  computeInvoiceStatus,
+  dayRateToHourly,
+  FOLDER_NAME,
+  SIGNATURE_FONTS,
+} from "./lib/utils";
 
 export default function App() {
   const [invoices, setInvoices] = useState([]);
@@ -653,6 +152,7 @@ export default function App() {
   const [showInvoiceGenerator, setShowInvoiceGenerator] = useState(false);
   const [invoiceForm, setInvoiceForm] = useState(null);
   const [clients, setClients] = useState([]);
+  const [invoiceTemplates, setInvoiceTemplates] = useState([]);
   const [showClientManager, setShowClientManager] = useState(false);
   const [newClient, setNewClient] = useState({ name: "", address: "", city: "", state: "", zip: "", email: "", phone: "" });
   const [pkgQaId, setPkgQaId] = useState("");
@@ -724,6 +224,7 @@ export default function App() {
         if (Array.isArray(d.gasLogs)) setGasLogs(d.gasLogs);
         if (Array.isArray(d.kitPackages)) setKitPackages(d.kitPackages);
         if (Array.isArray(d.clients)) setClients(d.clients);
+        if (Array.isArray(d.invoiceTemplates)) setInvoiceTemplates(d.invoiceTemplates);
         if (Array.isArray(d.holdDays)) setHoldDays(d.holdDays);
         if (d.calendarNotes && typeof d.calendarNotes === "object" && !Array.isArray(d.calendarNotes)) setCalendarNotes(d.calendarNotes);
       }
@@ -877,9 +378,9 @@ export default function App() {
   // Depends on `hydrated` so it only fires after the load effect's setState calls have rendered.
   useEffect(() => {
     if (!hydrated) return;
-    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients, holdDays, calendarNotes };
+    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients, holdDays, calendarNotes, invoiceTemplates };
     try { localStorage.setItem("hibp_data", JSON.stringify(data)); } catch {}
-  }, [hydrated, invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients, holdDays, calendarNotes]);
+  }, [hydrated, invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients, holdDays, calendarNotes, invoiceTemplates]);
 
   // ── EXPORT / RELINK ──────────────────────────────────────────────────────────
   const exportData = () => {
@@ -1038,7 +539,7 @@ export default function App() {
 
   const addJob = (name) => {
     if (!name.trim()) return;
-    const job = { id: crypto.randomUUID(), name: name.trim(), timestamp: Date.now() };
+    const job = { id: crypto.randomUUID(), name: name.trim(), status: "active", timestamp: Date.now() };
     setJobs(prev => [...prev, job]);
     return job.id;
   };
@@ -1088,6 +589,10 @@ export default function App() {
     setInvoices(prev => prev.map(i => i.jobId === id ? { ...i, jobId: "" } : i));
     setTimecards(prev => prev.map(t => t.jobId === id ? { ...t, jobId: "" } : t));
     setPurchases(prev => prev.map(p => p.jobId === id ? { ...p, jobId: "" } : p));
+  };
+
+  const setJobStatus = (id, status) => {
+    setJobs(prev => prev.map(j => j.id === id ? { ...j, status } : j));
   };
 
   const toggleJobExpanded = (id) => {
@@ -1911,6 +1416,37 @@ ${printStyle}</style></head><body>
     });
     setEditingInvoiceId(null);
     setShowInvoiceGenerator(true);
+  };
+
+  const saveAsTemplate = (inv) => {
+    const data = inv.generatedData || inv;
+    const template = {
+      id: crypto.randomUUID(),
+      name: data.company ? `${data.company}${data.jobName ? ` — ${data.jobName}` : ""}` : "Invoice Template",
+      createdAt: new Date().toISOString().split("T")[0],
+      data: { ...data },
+    };
+    setInvoiceTemplates(prev => [...prev, template]);
+  };
+
+  const generateFromTemplate = (template) => {
+    const today = new Date().toISOString().split("T")[0];
+    const dueD = new Date(); dueD.setDate(dueD.getDate() + 30);
+    const y = new Date().getFullYear(), mo = String(new Date().getMonth() + 1).padStart(2, "0"), dy = String(new Date().getDate()).padStart(2, "0");
+    setInvoiceForm({
+      ...template.data,
+      invoiceNumber: `INV-${y}${mo}${dy}-001`,
+      invoiceDate: today,
+      dueDate: dueD.toISOString().split("T")[0],
+      lineItems: (template.data.lineItems || []).map(li => ({ ...li, id: crypto.randomUUID() })),
+      paymentMethods: template.data.paymentMethods || ["ACH"],
+    });
+    setEditingInvoiceId(null);
+    setShowInvoiceGenerator(true);
+  };
+
+  const deleteTemplate = (id) => {
+    setInvoiceTemplates(prev => prev.filter(t => t.id !== id));
   };
 
   const openEditInvoice = (item) => {
@@ -4279,7 +3815,7 @@ ${printStyle}</style></head><body>
         )}
 
         {/* Year selector — hidden on Kit tab */}
-        <div className={`flex items-center gap-2 flex-wrap ${activeTab === "kit" || activeTab === "calendar" || activeTab === "tax" ? "hidden" : ""}`}>
+        <div className={`flex items-center gap-2 flex-wrap ${activeTab === "kit" || activeTab === "calendar" || activeTab === "tax" || activeTab === "clients" ? "hidden" : ""}`}>
           <span className="text-xs font-bold text-slate-400 uppercase tracking-wider mr-1">Year</span>
           {allYears.map(yr => (
             <button key={yr} onClick={() => setSelectedYear(yr)}
@@ -4316,6 +3852,9 @@ ${printStyle}</style></head><body>
             </button>
             <button onClick={() => { setActiveTab("tax"); setSearchQuery(""); }} className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "tax" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
               <Calculator size={14} className="inline mr-1.5 -mt-0.5" />Tax Est.
+            </button>
+            <button onClick={() => { setActiveTab("clients"); setSearchQuery(""); }} className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "clients" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
+              <Users size={14} className="inline mr-1.5 -mt-0.5" />Clients
             </button>
           </div>
           <div className="relative flex-1 min-w-[200px] max-w-xs">
@@ -4362,2909 +3901,244 @@ ${printStyle}</style></head><body>
 
         {/* ── INVOICES ── */}
         {activeTab === "invoices" && (
-          <>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-              <Card className="p-6 bg-blue-50 border-blue-200">
-                <p className="text-blue-700 text-sm font-medium">Total Billed</p>
-                <h2 className="text-3xl font-bold mt-1 text-blue-700">${totalBilled.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-              </Card>
-              <Card className="p-6">
-                <p className="text-slate-500 text-sm font-medium">Received</p>
-                <h2 className="text-3xl font-bold mt-1 text-emerald-600">${totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-              </Card>
-              <Card className="p-6">
-                <p className="text-slate-500 text-sm font-medium">Outstanding</p>
-                <h2 className={`text-3xl font-bold mt-1 ${totalOutstanding > 0 ? "text-red-500" : "text-slate-400"}`}>${totalOutstanding.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-              </Card>
-              <Card className="p-6">
-                <p className="text-slate-500 text-sm font-medium">Est. Taxes (25%)</p>
-                <h2 className="text-3xl font-bold mt-1 text-amber-600">${(totalBilled * TAX_RATE).toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-              </Card>
-            </div>
-
-            {/* YTD Summary card */}
-            {(() => {
-              const ytdYear = new Date().getFullYear();
-              const ytdInvoices = invoices.filter(i => { try { return new Date(i.date + "T12:00").getFullYear() === ytdYear; } catch { return false; } });
-              const ytdTimecards = timecards.filter(t => { try { return new Date(t.date + "T12:00").getFullYear() === ytdYear; } catch { return false; } });
-              const ytdBilled = ytdInvoices.reduce((a, i) => a + (parseFloat(i.amount) || 0), 0);
-              const ytdReceived = ytdInvoices.reduce((a, i) => {
-                const s = computeInvoiceStatus(i);
-                if (s === "Paid") return a + (parseFloat(i.amount) || 0);
-                if (s === "Partially Paid") return a + (parseFloat(i.amountReceived) || 0);
-                return a;
-              }, 0);
-              const ytdOutstanding = ytdBilled - ytdReceived;
-              const ytdEarned = ytdTimecards.reduce((a, t) => a + (parseFloat(t.total) || 0), 0);
-              const ytdEstTax = ytdReceived * TAX_RATE;
-              return (
-                <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-xl p-4 text-white">
-                  <p className="text-xs font-bold text-blue-200 uppercase tracking-wider mb-3">{ytdYear} Year-to-Date</p>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                    <div>
-                      <p className="text-blue-200 text-xs">TC Earnings</p>
-                      <p className="text-xl font-bold">${ytdEarned.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</p>
-                    </div>
-                    <div>
-                      <p className="text-blue-200 text-xs">Inv. Received</p>
-                      <p className="text-xl font-bold">${ytdReceived.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</p>
-                    </div>
-                    <div>
-                      <p className="text-blue-200 text-xs">Outstanding</p>
-                      <p className="text-xl font-bold">${ytdOutstanding.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</p>
-                    </div>
-                    <div>
-                      <p className="text-blue-200 text-xs">Est. Tax (25%)</p>
-                      <p className="text-xl font-bold text-amber-300">${ytdEstTax.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</p>
-                    </div>
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* Overdue / due-soon notification banners */}
-            {(() => {
-              const today = new Date(); today.setHours(0,0,0,0);
-              const unpaid = invoices.filter(i => { const s = computeInvoiceStatus(i); return s !== "Paid"; });
-              const getDue = i => { const d = new Date(i.dueDate || (() => { const x = new Date(i.date); x.setDate(x.getDate() + 30); return x.toISOString().split("T")[0]; })()); d.setHours(0,0,0,0); return d; };
-              const overdue = unpaid.filter(i => getDue(i) < today);
-              const dueSoon = unpaid.filter(i => { const diff = Math.round((getDue(i) - today) / 86400000); return diff >= 0 && diff <= 7; });
-              if (overdue.length === 0 && dueSoon.length === 0) return null;
-              return (
-                <div className="space-y-2">
-                  {overdue.length > 0 && (
-                    <div className="flex items-start gap-3 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
-                      <AlertCircle size={16} className="text-red-500 mt-0.5 shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-bold text-red-700">{overdue.length} overdue invoice{overdue.length !== 1 ? "s" : ""}</p>
-                        <p className="text-xs text-red-500 mt-0.5 truncate">{overdue.map(i => i.company || "Unnamed").join(", ")}</p>
-                      </div>
-                      <span className="text-sm font-bold text-red-600 shrink-0">${overdue.reduce((a, b) => a + (parseFloat(b.amount) || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                    </div>
-                  )}
-                  {dueSoon.length > 0 && (
-                    <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
-                      <CalendarClock size={16} className="text-amber-500 mt-0.5 shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-bold text-amber-700">{dueSoon.length} invoice{dueSoon.length !== 1 ? "s" : ""} due within 7 days</p>
-                        <p className="text-xs text-amber-500 mt-0.5 truncate">{dueSoon.map(i => i.company || "Unnamed").join(", ")}</p>
-                      </div>
-                      <span className="text-sm font-bold text-amber-600 shrink-0">${dueSoon.reduce((a, b) => a + (parseFloat(b.amount) || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-
-            {/* Invoice aging report */}
-            {(() => {
-              const today = new Date(); today.setHours(0,0,0,0);
-              const unpaid = invoices.filter(i => { const s = computeInvoiceStatus(i); return s !== "Paid"; });
-              const getDue = i => { const d = new Date(i.dueDate || (() => { const x = new Date(i.date); x.setDate(x.getDate() + 30); return x.toISOString().split("T")[0]; })()); d.setHours(0,0,0,0); return d; };
-              const buckets = [
-                { label: "Current", range: [null, 0], color: "text-emerald-600 bg-emerald-50", border: "border-emerald-200" },
-                { label: "1–30 days", range: [1, 30], color: "text-amber-600 bg-amber-50", border: "border-amber-200" },
-                { label: "31–60 days", range: [31, 60], color: "text-orange-600 bg-orange-50", border: "border-orange-200" },
-                { label: "61–90 days", range: [61, 90], color: "text-red-500 bg-red-50", border: "border-red-200" },
-                { label: "90+ days", range: [91, null], color: "text-red-700 bg-red-100", border: "border-red-300" },
-              ];
-              const bucketData = buckets.map(b => {
-                const items = unpaid.filter(i => {
-                  const diff = Math.round((today - getDue(i)) / 86400000);
-                  if (b.range[0] === null) return diff <= 0;
-                  if (b.range[1] === null) return diff >= b.range[0];
-                  return diff >= b.range[0] && diff <= b.range[1];
-                });
-                const total = items.reduce((a, i) => a + Math.max(0, (parseFloat(i.amount) || 0) - (parseFloat(i.amountReceived) || 0)), 0);
-                return { ...b, count: items.length, total };
-              });
-              if (unpaid.length === 0) return null;
-              return (
-                <div className="bg-white border border-slate-200 rounded-xl p-4">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-3">Accounts Receivable Aging</p>
-                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-                    {bucketData.map(b => (
-                      <div key={b.label} className={`rounded-lg border p-3 ${b.border} ${b.color}`}>
-                        <p className="text-[10px] font-bold uppercase tracking-wide opacity-70">{b.label}</p>
-                        <p className="text-lg font-bold mt-0.5">${b.total.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</p>
-                        <p className="text-[10px] opacity-60">{b.count} invoice{b.count !== 1 ? "s" : ""}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* Job selector for upcoming upload */}
-            <div className="flex items-center gap-3 flex-wrap">
-              <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Upload to job</span>
-              <select value={uploadJobId} onChange={e => setUploadJobId(e.target.value)}
-                className="text-sm border border-slate-200 rounded-lg px-3 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
-                <option value="">— Unassigned —</option>
-                {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
-              </select>
-            </div>
-
-            {/* Jobs list */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xl font-bold">Invoices — {selectedYear}</h3>
-                <div className="flex items-center gap-2">
-                  <Button variant="ghost" onClick={() => relinkInputRef.current?.click()} className="h-8 text-xs gap-1.5 text-slate-500" title="Restore data from backup file">
-                    <RefreshCw size={13} /> Restore
-                  </Button>
-                  <Button variant="outline" onClick={openInvoiceGenerator} className="h-8 text-xs gap-1 text-blue-600 border-blue-200 hover:bg-blue-50">
-                    <FileText size={13} />Create Invoice
-                  </Button>
-                  {showNewJobForm ? (
-                    <form onSubmit={e => { e.preventDefault(); if (newJobName.trim()) { addJob(newJobName); setNewJobName(""); setShowNewJobForm(false); } }} className="flex gap-2">
-                      <Input value={newJobName} onChange={e => setNewJobName(e.target.value)} placeholder="Job name" className="w-48 h-8 text-sm" autoFocus />
-                      <Button type="submit" className="h-8 text-xs px-3">Save</Button>
-                      <Button type="button" variant="ghost" onClick={() => { setShowNewJobForm(false); setNewJobName(""); }} className="h-8 text-xs px-2">Cancel</Button>
-                    </form>
-                  ) : (
-                    <Button variant="outline" onClick={() => setShowNewJobForm(true)} className="h-8 text-xs"><Plus size={13} className="mr-1" />New Job</Button>
-                  )}
-                  <Button variant="outline" onClick={() => {
-                    const header = ["Invoice #", "Date", "Due Date", "Company", "Job", "Amount", "Received", "Payment Date", "Payment Method", "Status"];
-                    const rows = filteredInvoices.map(i => [i.invoiceNumber || "", i.date || "", i.dueDate || "", i.company || "", i.jobId ? (jobs.find(j => j.id === i.jobId)?.name || i.jobId) : "", i.amount || 0, i.amountReceived || 0, i.paymentDate || "", i.paymentMethod || "", computeInvoiceStatus(i)]);
-                    downloadCSV([header, ...rows], `invoices_${selectedYear}.csv`);
-                  }} className="h-8 text-xs gap-1.5"><FileDown size={13} />CSV</Button>
-                </div>
-              </div>
-
-              {/* Group invoices by job */}
-              {(() => {
-                const jobGroups = [
-                  ...jobs.map(j => ({ ...j, items: filteredInvoices.filter(i => i.jobId === j.id) })),
-                  { id: "", name: "Unassigned", items: filteredInvoices.filter(i => !i.jobId || !jobs.find(j => j.id === i.jobId)) },
-                ].filter(g => sq ? g.items.length > 0 : (g.items.length > 0 || g.id !== ""));
-
-                if (jobGroups.every(g => g.items.length === 0)) {
-                  return (
-                    <div className="py-20 text-center bg-white border-2 border-dashed border-slate-200 rounded-2xl">
-                      <div className="bg-slate-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300"><UploadCloud size={32} /></div>
-                      <h4 className="text-slate-900 font-semibold">{sq ? `No invoices match "${sq}"` : `No invoices for ${selectedYear}`}</h4>
-                      <p className="text-slate-500 text-sm">{sq ? "Try a different search term." : (selectedYear === currentYear ? "Upload a PDF or image — data will be read automatically." : "No invoices were recorded for this year.")}</p>
-                    </div>
-                  );
-                }
-
-                return jobGroups.map(group => {
-                  if (group.items.length === 0) return null;
-                  const isExpanded = sq || group.id === "" ? true : expandedJobs.has(group.id);
-                  const groupBilled = group.items.reduce((a, b) => a + (parseFloat(b.amount) || 0), 0);
-                  const groupPaid = group.items.reduce((a, b) => {
-                    const s = computeInvoiceStatus(b);
-                    if (s === "Paid") return a + (parseFloat(b.amount) || 0);
-                    if (s === "Partially Paid") return a + (parseFloat(b.amountReceived) || 0);
-                    return a;
-                  }, 0);
-                  return (
-                    <div key={group.id || "unassigned"} className="border border-slate-200 rounded-xl overflow-hidden bg-white">
-                      <div className="flex items-center justify-between px-4 py-3 bg-slate-50 border-b border-slate-200 cursor-pointer select-none"
-                        onClick={() => group.id && toggleJobExpanded(group.id)}>
-                        <div className="flex items-center gap-2">
-                          {group.id ? (
-                            isExpanded ? <ChevronDown size={16} className="text-slate-400" /> : <ChevronRight size={16} className="text-slate-400" />
-                          ) : <span className="w-4" />}
-                          <Briefcase size={15} className="text-slate-400" />
-                          <span className="font-semibold text-slate-800 text-sm">{group.name}</span>
-                          <span className="text-xs text-slate-400">({group.items.length} invoice{group.items.length !== 1 ? "s" : ""})</span>
-                        </div>
-                        <div className="flex items-center gap-4 text-xs font-medium">
-                          <span className="text-slate-500">Billed <span className="text-slate-800 font-bold">${groupBilled.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></span>
-                          <span className="text-emerald-600">Paid <span className="font-bold">${groupPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></span>
-                          {group.id && <Button variant="danger" onClick={e => { e.stopPropagation(); deleteJob(group.id); }} className="!p-1 ml-1" title="Delete job"><Trash2 size={13} /></Button>}
-                        </div>
-                      </div>
-                      {isExpanded && (
-                        <div className="p-4">
-                          {group.items.length === 0 ? (
-                            <p className="text-sm text-slate-400 text-center py-6">No invoices in this job yet. Select it in "Upload to job" then upload.</p>
-                          ) : (
-                            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                              {group.items.map((item) => {
-                                const idx = invoices.findIndex(i => i.id === item.id);
-                                const effectiveStatus = computeInvoiceStatus(item);
-                                const lateFee = calcLateFee(item);
-                                const amountReceived = parseFloat(item.amountReceived) || 0;
-                                const amountOwed = Math.max(0, (parseFloat(item.amount) || 0) - amountReceived);
-                                const statusBadgeClass = effectiveStatus === "Paid"
-                                  ? "bg-emerald-100 text-emerald-700"
-                                  : effectiveStatus === "Partially Paid"
-                                  ? "bg-orange-100 text-orange-700"
-                                  : "bg-amber-100 text-amber-700";
-                                return (<Card key={item.id} id={item.id} className={`transition-all flex flex-col ${item.locked ? "border-amber-200 bg-amber-50/20" : "hover:border-blue-200"} ${highlightedId === item.id ? "ring-2 ring-blue-500 border-blue-400" : ""}`}>
-                                  <div className="p-5 flex-1 space-y-4">
-                                    <div className="flex justify-between items-start">
-                                      <div className={`px-2.5 py-1 rounded-md text-xs font-bold uppercase tracking-wider ${statusBadgeClass}`}>{effectiveStatus}</div>
-                                      <div className="flex items-center gap-1">
-                                        <button
-                                          onClick={() => { const n = [...invoices]; n[idx] = { ...n[idx], locked: !n[idx].locked }; setInvoices(n); }}
-                                          className={`p-1.5 rounded-lg transition-colors ${item.locked ? "text-amber-600 bg-amber-100 hover:bg-amber-200" : "text-slate-300 hover:text-slate-500 hover:bg-slate-100"}`}
-                                          title={item.locked ? "Unlock entry to edit" : "Lock entry to prevent edits"}>
-                                          {item.locked ? <Lock size={13} /> : <LockOpen size={13} />}
-                                        </button>
-                                        <select value={item.jobId || ""} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], jobId: e.target.value }; setInvoices(n); }}
-                                          disabled={!!item.locked}
-                                          className="text-[10px] border border-slate-200 rounded px-1.5 py-0.5 bg-white text-slate-500 focus:outline-none max-w-[100px] disabled:opacity-50 disabled:cursor-not-allowed" title="Move to job">
-                                          <option value="">Unassigned</option>
-                                          {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
-                                        </select>
-                                        <Button variant="danger" onClick={() => deleteInvoice(item.id)} className="!p-1.5"><Trash2 size={14} /></Button>
-                                        <button
-                                          onClick={() => duplicateInvoice(item)}
-                                          className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
-                                          title="Duplicate invoice with today's date &amp; new number">
-                                          <Copy size={13} />
-                                        </button>
-                                      </div>
-                                    </div>
-                                    {item.invoiceNumber && <p className="text-[11px] text-slate-400 font-mono tracking-wide -mt-2">#{item.invoiceNumber}</p>}
-                                    {effectiveStatus !== "Paid" && (() => {
-                                      const today = new Date(); today.setHours(0,0,0,0);
-                                      const defaultDue = item.dueDate || (() => { const d = new Date(item.date); d.setDate(d.getDate() + 30); return d.toISOString().split("T")[0]; })();
-                                      const due = new Date(defaultDue); due.setHours(0,0,0,0);
-                                      const diff = Math.round((due - today) / 86400000);
-                                      if (diff < 0) return <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-100 text-red-700 text-[11px] font-bold w-fit"><AlertCircle size={12} />{Math.abs(diff)}d overdue{lateFee > 0 ? ` · +$${lateFee.toLocaleString(undefined,{minimumFractionDigits:2})} late fee` : ""}</div>;
-                                      if (diff <= 7) return <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-100 text-amber-700 text-[11px] font-bold w-fit"><CalendarClock size={12} />Due in {diff}d</div>;
-                                      return <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-100 text-slate-500 text-[11px] w-fit"><CalendarClock size={12} />Due in {diff}d</div>;
-                                    })()}
-                                    <div className="space-y-3">
-                                      <div className="space-y-1">
-                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Client / Company</label>
-                                        {clients.length > 0 && !item.locked && (
-                                          <select value="" onChange={e => { if (e.target.value) { const n = [...invoices]; n[idx] = { ...n[idx], company: e.target.value }; setInvoices(n); } }}
-                                            className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 mb-1">
-                                            <option value="">— Saved client —</option>
-                                            {clients.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
-                                          </select>
-                                        )}
-                                        <Input value={item.company} placeholder="Click to add company name" disabled={!!item.locked} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], company: e.target.value }; setInvoices(n); }} />
-                                      </div>
-                                      <div className="grid grid-cols-2 gap-3">
-                                        <div className="space-y-1">
-                                          <label className="text-[10px] font-bold text-slate-400 uppercase">Amount ($)</label>
-                                          <Input type="number" value={item.amount} disabled={!!item.locked} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], amount: e.target.value }; setInvoices(n); }} />
-                                        </div>
-                                        <div className="space-y-1">
-                                          <label className="text-[10px] font-bold text-slate-400 uppercase">Date</label>
-                                          <Input type="date" value={item.date} disabled={!!item.locked} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], date: e.target.value }; setInvoices(n); }} />
-                                        </div>
-                                      </div>
-                                      {/* Payment Terms + Due Date */}
-                                      <div className="grid grid-cols-2 gap-3">
-                                        <div className="space-y-1">
-                                          <label className="text-[10px] font-bold text-slate-400 uppercase">Payment Terms</label>
-                                          <select
-                                            value={item.paymentTerms || "Net 30"}
-                                            disabled={!!item.locked}
-                                            onChange={e => {
-                                              const terms = e.target.value;
-                                              const newDue = dueDateFromTerms(item.date, terms);
-                                              const n = [...invoices];
-                                              n[idx] = { ...n[idx], paymentTerms: terms, ...(newDue ? { dueDate: newDue } : {}) };
-                                              setInvoices(n);
-                                            }}
-                                            className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-50">
-                                            {PAYMENT_TERMS.map(t => <option key={t.label} value={t.label}>{t.label}</option>)}
-                                          </select>
-                                        </div>
-                                        <div className="space-y-1">
-                                          <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><CalendarClock size={10} />Due Date</label>
-                                          <Input type="date" value={item.dueDate || (() => { const d = new Date(item.date); d.setDate(d.getDate() + 30); return d.toISOString().split("T")[0]; })()} disabled={!!item.locked} onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], dueDate: e.target.value, paymentTerms: "Custom" }; setInvoices(n); }} />
-                                        </div>
-                                      </div>
-                                      {/* Late Fee */}
-                                      <div className="space-y-1">
-                                        <label className="text-[10px] font-bold text-slate-400 uppercase">Late Fee</label>
-                                        <div className="flex gap-2">
-                                          <select
-                                            value={item.lateFeeType || "none"}
-                                            disabled={!!item.locked}
-                                            onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], lateFeeType: e.target.value }; setInvoices(n); }}
-                                            className="rounded-lg border border-gray-300 bg-white px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-slate-50">
-                                            <option value="none">None</option>
-                                            <option value="flat">Flat fee ($)</option>
-                                            <option value="daily">Daily interest (%/day)</option>
-                                          </select>
-                                          {item.lateFeeType && item.lateFeeType !== "none" && (
-                                            <Input
-                                              type="number"
-                                              value={item.lateFeeRate || ""}
-                                              disabled={!!item.locked}
-                                              placeholder={item.lateFeeType === "flat" ? "e.g. 50" : "e.g. 0.1"}
-                                              onChange={e => { const n = [...invoices]; n[idx] = { ...n[idx], lateFeeRate: e.target.value }; setInvoices(n); }}
-                                              className="flex-1"
-                                            />
-                                          )}
-                                        </div>
-                                        {lateFee > 0 && (
-                                          <p className="text-[11px] text-red-600 font-semibold">
-                                            Current late fee: ${lateFee.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                          </p>
-                                        )}
-                                      </div>
-                                      {/* Payment History */}
-                                      {(() => {
-                                        const pmts = item.payments || [];
-                                        const ML = { ach: "ACH/Wire", check: "Check", cash: "Cash", paypal: "PayPal", zelle: "Zelle", venmo: "Venmo", other: "Other" };
-                                        return (
-                                          <div className="space-y-1.5">
-                                            <div className="flex items-center justify-between">
-                                              <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><CreditCard size={10} />Payment History</label>
-                                              {amountReceived > 0 && <span className="text-[10px] text-slate-400">${amountReceived.toLocaleString(undefined,{minimumFractionDigits:2})} of ${(parseFloat(item.amount)||0).toLocaleString(undefined,{minimumFractionDigits:2})}</span>}
-                                            </div>
-                                            {pmts.length > 0 ? (
-                                              <div className="space-y-1">
-                                                {pmts.map(pmt => (
-                                                  <div key={pmt.id} className="flex items-center gap-2 px-2.5 py-1.5 bg-emerald-50 border border-emerald-100 rounded-lg text-xs">
-                                                    <span className="font-mono text-slate-500 shrink-0">{pmt.date}</span>
-                                                    <span className="font-bold text-emerald-700 flex-1">${(parseFloat(pmt.amount)||0).toLocaleString(undefined,{minimumFractionDigits:2})}</span>
-                                                    {pmt.method && <span className="text-[9px] bg-emerald-100 text-emerald-600 border border-emerald-200 px-1.5 py-0.5 rounded font-medium">{ML[pmt.method]||pmt.method}</span>}
-                                                    {!item.locked && (
-                                                      <button onClick={() => {
-                                                        const newPmts = pmts.filter(p => p.id !== pmt.id);
-                                                        const newTotal = newPmts.reduce((a,p) => a+(parseFloat(p.amount)||0), 0);
-                                                        const n = [...invoices]; n[idx] = { ...n[idx], payments: newPmts, amountReceived: newTotal, status: newTotal <= 0 ? "Unpaid" : newTotal >= (parseFloat(item.amount)||0) ? "Paid" : "Partially Paid" }; setInvoices(n);
-                                                      }} className="text-slate-300 hover:text-red-400 transition-colors shrink-0" title="Remove payment"><Trash2 size={11} /></button>
-                                                    )}
-                                                  </div>
-                                                ))}
-                                              </div>
-                                            ) : parseFloat(item.amountReceived) > 0 ? (
-                                              <div className="flex items-center gap-2 px-2.5 py-1.5 bg-emerald-50 border border-emerald-100 rounded-lg text-xs">
-                                                {item.paymentDate && <span className="font-mono text-slate-500 shrink-0">{item.paymentDate}</span>}
-                                                <span className="font-bold text-emerald-700 flex-1">${(parseFloat(item.amountReceived)||0).toLocaleString(undefined,{minimumFractionDigits:2})}</span>
-                                                {item.paymentMethod && <span className="text-[9px] bg-emerald-100 text-emerald-600 border border-emerald-200 px-1.5 py-0.5 rounded font-medium">{ML[item.paymentMethod]||item.paymentMethod}</span>}
-                                              </div>
-                                            ) : (
-                                              <p className="text-[11px] text-slate-400 italic">No payments recorded yet.</p>
-                                            )}
-                                            {effectiveStatus === "Partially Paid" && (
-                                              <p className="text-[11px] text-orange-600 font-semibold">
-                                                Balance owed: ${amountOwed.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                                {lateFee > 0 ? ` + $${lateFee.toLocaleString(undefined, { minimumFractionDigits: 2 })} late fee` : ""}
-                                              </p>
-                                            )}
-                                          </div>
-                                        );
-                                      })()}
-                                    </div>
-                                  </div>
-                                  <div className="p-3 bg-slate-50 border-t border-slate-100 flex gap-2">
-                                    <Button variant="outline" className="flex-none" onClick={() => setPreviewItem(item)} title="Preview invoice">
-                                      <Eye size={15} className="mr-1.5" /> View
-                                    </Button>
-                                    {item.generated && item.generatedData && (
-                                      <Button variant="outline" className="flex-none text-blue-600 border-blue-200 hover:bg-blue-50" onClick={() => openEditInvoice(item)} title="Edit invoice">
-                                        <Pencil size={15} className="mr-1.5" />Edit
-                                      </Button>
-                                    )}
-                                    {effectiveStatus !== "Paid" ? (
-                                      <Button variant="success" className="flex-1" onClick={() => {
-                                        setMarkPaidModal({ id: item.id, idx, amount: parseFloat(item.amount) || 0, existingPayments: item.payments || [] });
-                                        setMarkPaidMode(null);
-                                        setMarkPaidPartialAmt("");
-                                        setMarkPaidDate(new Date().toISOString().split("T")[0]);
-                                        setMarkPaidMethod("");
-                                      }}>Mark as Paid</Button>
-                                    ) : (
-                                      <Button variant="outline" className="flex-1 text-emerald-600 border-emerald-200 hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-colors group" onClick={() => { const n = [...invoices]; n[idx] = { ...n[idx], status: "Unpaid", amountReceived: 0, payments: [] }; setInvoices(n); }} title="Click to mark as unpaid">
-                                        <CheckCircle size={15} className="mr-1.5 group-hover:hidden" />
-                                        <X size={15} className="mr-1.5 hidden group-hover:inline" />
-                                        <span className="group-hover:hidden">Paid</span>
-                                        <span className="hidden group-hover:inline">Mark Unpaid</span>
-                                      </Button>
-                                    )}
-                                    {!item.paystub ? (
-                                      <div className="relative flex-none">
-                                        <input type="file" accept="image/*,.pdf"
-                                          onChange={e => { if (e.target.files[0]) handlePaystubUpload(item.id, e.target.files[0]); e.target.value = ""; }}
-                                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                                          disabled={paystubUploading === item.id} />
-                                        <Button variant="outline" disabled={paystubUploading === item.id} className="text-blue-600 border-blue-200 hover:bg-blue-50 whitespace-nowrap">
-                                          {paystubUploading === item.id ? <><Loader2 size={13} className="animate-spin mr-1.5" />Reading...</> : <><UploadCloud size={13} className="mr-1.5" />Paystub</>}
-                                        </Button>
-                                      </div>
-                                    ) : (
-                                      <Button variant="outline" className="flex-none text-emerald-700 border-emerald-200 hover:bg-emerald-50"
-                                        onClick={() => setPreviewItem({ ...item, id: "paystub_" + item.id, fileName: item.paystub.fileName, fileId: item.paystub.fileId, fileType: item.paystub.fileType })}>
-                                        <CheckCircle size={13} className="mr-1.5" />Paystub
-                                      </Button>
-                                    )}
-                                  </div>
-                                  {item.paystub && (
-                                    <div className="px-5 pb-4 pt-0 bg-white space-y-2">
-                                      <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-3 space-y-1.5">
-                                        <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider flex items-center gap-1.5"><CheckCircle size={11} />Paystub Verified</p>
-                                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                                          {item.paystub.grossPay > 0 && <div><span className="text-slate-400">Gross Pay </span><span className="font-semibold text-slate-700">${item.paystub.grossPay.toLocaleString(undefined,{minimumFractionDigits:2})}</span></div>}
-                                          {item.paystub.netPay > 0 && <div><span className="text-slate-400">Net Pay </span><span className="font-semibold text-slate-700">${item.paystub.netPay.toLocaleString(undefined,{minimumFractionDigits:2})}</span></div>}
-                                          {item.paystub.payDate && <div><span className="text-slate-400">Pay Date </span><span className="font-semibold text-slate-700">{item.paystub.payDate}</span></div>}
-                                          {item.paystub.checkNumber && <div><span className="text-slate-400">Check # </span><span className="font-semibold text-slate-700 font-mono">{item.paystub.checkNumber}</span></div>}
-                                        </div>
-                                        <button onClick={() => { setInvoices(prev => prev.map(inv => inv.id === item.id ? { ...inv, paystub: undefined } : inv)); URL.revokeObjectURL(blobCache.current.get("paystub_" + item.id)?.url); blobCache.current.delete("paystub_" + item.id); }}
-                                          className="text-[10px] text-red-400 hover:text-red-600 mt-1">Remove paystub</button>
-                                      </div>
-                                    </div>
-                                  )}
-                                </Card>);
-                              })}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                });
-              })()}
-            </div>
-          </>
+          <InvoicesTab
+            totalBilled={totalBilled}
+            totalPaid={totalPaid}
+            totalOutstanding={totalOutstanding}
+            invoices={invoices}
+            setInvoices={setInvoices}
+            timecards={timecards}
+            filteredInvoices={filteredInvoices}
+            uploadJobId={uploadJobId}
+            setUploadJobId={setUploadJobId}
+            jobs={jobs}
+            clients={clients}
+            selectedYear={selectedYear}
+            currentYear={currentYear}
+            sq={sq}
+            expandedJobs={expandedJobs}
+            toggleJobExpanded={toggleJobExpanded}
+            highlightedId={highlightedId}
+            deleteInvoice={deleteInvoice}
+            duplicateInvoice={duplicateInvoice}
+            relinkInputRef={relinkInputRef}
+            openInvoiceGenerator={openInvoiceGenerator}
+            openEditInvoice={openEditInvoice}
+            showNewJobForm={showNewJobForm}
+            setShowNewJobForm={setShowNewJobForm}
+            newJobName={newJobName}
+            setNewJobName={setNewJobName}
+            addJob={addJob}
+            deleteJob={deleteJob}
+            setJobStatus={setJobStatus}
+            invoiceTemplates={invoiceTemplates}
+            saveAsTemplate={saveAsTemplate}
+            generateFromTemplate={generateFromTemplate}
+            deleteTemplate={deleteTemplate}
+            setPreviewItem={setPreviewItem}
+            setMarkPaidModal={setMarkPaidModal}
+            setMarkPaidMode={setMarkPaidMode}
+            setMarkPaidPartialAmt={setMarkPaidPartialAmt}
+            setMarkPaidDate={setMarkPaidDate}
+            setMarkPaidMethod={setMarkPaidMethod}
+            paystubUploading={paystubUploading}
+            handlePaystubUpload={handlePaystubUpload}
+            blobCache={blobCache}
+          />
         )}
 
         {/* ── TIMECARDS ── */}
         {activeTab === "timecards" && (
-          <>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-              <Card className="p-6 bg-blue-50 border-blue-200">
-                <p className="text-blue-700 text-sm font-medium">Total Hours Logged</p>
-                <h2 className="text-3xl font-bold mt-1 text-blue-700">{totalTimecardHours.toFixed(1)} hrs</h2>
-              </Card>
-              <Card className="p-6">
-                <p className="text-slate-500 text-sm font-medium">Total Earnings</p>
-                <h2 className="text-3xl font-bold mt-1 text-blue-600">${totalTimecardEarnings.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-              </Card>
-              <Card className="p-6">
-                <p className="text-slate-500 text-sm font-medium">Paid</p>
-                <h2 className="text-3xl font-bold mt-1 text-emerald-600">${totalTimecardInvoiced.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-              </Card>
-              <Card className="p-6">
-                <p className="text-slate-500 text-sm font-medium">Est. Taxes (25%)</p>
-                <h2 className="text-3xl font-bold mt-1 text-amber-600">${(totalTimecardEarnings * TAX_RATE).toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-              </Card>
-            </div>
-            {/* ── Classification Manager ── */}
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-slate-400">Manage your saved classifications for quick-select in timecards.</span>
-              <Button variant="outline" onClick={() => setShowClassificationManager(p => !p)} className="text-xs h-8">
-                <Wrench size={13} className="mr-1.5" />{showClassificationManager ? "Hide" : "Manage Classifications"}
-              </Button>
-            </div>
-            {showClassificationManager && (
-              <Card className="p-4">
-                <h4 className="text-sm font-bold mb-3">Saved Classifications</h4>
-                <div className="flex flex-wrap gap-2 mb-3">
-                  {classifications.length === 0 && <span className="text-xs text-slate-400 italic">No classifications saved yet.</span>}
-                  {classifications.map(c => (
-                    <span key={c} className="flex items-center gap-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-full px-3 py-1 text-xs font-medium">
-                      {c}
-                      <button onClick={() => setClassifications(prev => prev.filter(x => x !== c))} className="text-blue-400 hover:text-red-500 transition-colors" title="Remove"><X size={11} /></button>
-                    </span>
-                  ))}
-                </div>
-                <form onSubmit={e => { e.preventDefault(); const v = newClassificationName.trim(); if (v && !classifications.includes(v)) { setClassifications(prev => [...prev, v].sort()); } setNewClassificationName(""); }} className="flex gap-2">
-                  <Input value={newClassificationName} onChange={e => setNewClassificationName(e.target.value)} placeholder="e.g. Director of Photography" className="flex-1" autoFocus />
-                  <Button type="submit" disabled={!newClassificationName.trim()}><Plus size={14} className="mr-1" />Add</Button>
-                </form>
-              </Card>
-            )}
-
-            {/* ── Weekly Timecard Entry Form ── */}
-            <Card className="p-5">
-              <h3 className="text-base font-bold mb-4">
-                New Timecard — {newTimecard.days?.[0]?.date ? new Date(newTimecard.days[0].date + "T12:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }) : ""} – {newTimecard.weekEnding ? new Date(newTimecard.weekEnding + "T12:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : ""}
-              </h3>
-
-              {/* Header fields */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
-                <div className="space-y-1 col-span-2 sm:col-span-3 lg:col-span-2">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Production Company *</label>
-                  {clients.length > 0 && (
-                    <select value="" onChange={e => { if (e.target.value) setNewTimecard(p => ({ ...p, company: e.target.value })); }}
-                      className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 mb-1">
-                      <option value="">— Saved client —</option>
-                      {clients.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
-                    </select>
-                  )}
-                  <Input value={newTimecard.company} onChange={e => setNewTimecard(p => ({ ...p, company: e.target.value }))} placeholder="e.g. KISSD Honda" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Job</label>
-                  <select value={newTimecard.jobId} onChange={e => setNewTimecard(p => ({ ...p, jobId: e.target.value }))}
-                    className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
-                    <option value="">— Unassigned —</option>
-                    {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
-                  </select>
-                </div>
-                <div className="space-y-1 col-span-2 sm:col-span-3 lg:col-span-2">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Job Name / Show</label>
-                  <Input value={newTimecard.jobName} onChange={e => setNewTimecard(p => ({ ...p, jobName: e.target.value }))} placeholder="e.g. Honda Civic Campaign" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Classification</label>
-                  <div className="flex gap-1">
-                    <select
-                      value={classifications.includes(newTimecard.jobClassification) ? newTimecard.jobClassification : ""}
-                      onChange={e => { if (e.target.value) setNewTimecard(p => ({ ...p, jobClassification: e.target.value })); }}
-                      className="flex-1 min-w-0 rounded-lg border border-gray-300 bg-white px-2 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
-                      <option value="">— Quick select —</option>
-                      {classifications.map(c => <option key={c} value={c}>{c}</option>)}
-                    </select>
-                  </div>
-                  <Input value={newTimecard.jobClassification} onChange={e => setNewTimecard(p => ({ ...p, jobClassification: e.target.value }))} placeholder="or type here" className="mt-1" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Week Ending (Sat)</label>
-                  <Input type="date" value={newTimecard.weekEnding}
-                    onChange={e => {
-                      const raw = e.target.value;
-                      if (!raw) return;
-                      // Snap entered date to nearest Saturday
-                      const entered = new Date(raw + "T12:00");
-                      const dow = entered.getDay(); // 0=Sun … 6=Sat
-                      const daysToSat = (6 - dow + 7) % 7; // 0 if already Sat
-                      entered.setDate(entered.getDate() + daysToSat);
-                      const we = entered.toISOString().split("T")[0];
-                      setNewTimecard(p => ({ ...p, weekEnding: we, days: initWeekDays(we) }));
-                    }} />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Rate ($/hr) *</label>
-                  <Input type="number" value={newTimecard.rate} onChange={e => setNewTimecard(p => ({ ...p, rate: e.target.value, dayRate: "" }))} placeholder="e.g. 750" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">— or — Day Rate ($)</label>
-                  <div className="flex gap-1">
-                    <Input type="number" value={newTimecard.dayRate} onChange={e => {
-                      const dr = e.target.value;
-                      const hr = dayRateToHourly(dr, newTimecard.dayRateType);
-                      setNewTimecard(p => ({ ...p, dayRate: dr, rate: hr, guarHours: p.dayRateType === "12" ? "12" : "10" }));
-                    }} placeholder="e.g. 1650" className="flex-1" />
-                    <div className="flex rounded-lg border border-gray-300 overflow-hidden text-xs font-bold shrink-0">
-                      {["10", "12"].map(t => (
-                        <button key={t} type="button"
-                          onClick={() => {
-                            const hr = dayRateToHourly(newTimecard.dayRate, t);
-                            setNewTimecard(p => ({ ...p, dayRateType: t, rate: hr || p.rate, guarHours: t }));
-                          }}
-                          className={`px-2.5 py-1 transition-colors ${newTimecard.dayRateType === t ? "bg-blue-600 text-white" : "bg-white text-slate-500 hover:bg-slate-50"}`}>
-                          {t}hr
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  {newTimecard.dayRate && newTimecard.rate && (
-                    <p className="text-[10px] text-blue-500">≈ ${parseFloat(newTimecard.rate).toFixed(4)}/hr (auto-calculated)</p>
-                  )}
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Guar. Hours</label>
-                  <Input type="number" value={newTimecard.guarHours} onChange={e => setNewTimecard(p => ({ ...p, guarHours: e.target.value }))} placeholder="10" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Mileage (mi)</label>
-                  <Input type="number" value={newTimecard.mileage} onChange={e => setNewTimecard(p => ({ ...p, mileage: e.target.value }))} placeholder="0" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Work Day Per Diem ($)</label>
-                  <Input type="number" value={newTimecard.workPerDiem} onChange={e => setNewTimecard(p => ({ ...p, workPerDiem: e.target.value }))} placeholder="0" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Day Off Per Diem ($)</label>
-                  <Input type="number" value={newTimecard.daysOffPerDiem} onChange={e => setNewTimecard(p => ({ ...p, daysOffPerDiem: e.target.value }))} placeholder="0" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Kit/Box Rental ($/day)</label>
-                  <Input type="number" value={newTimecard.kitRentalRate} onChange={e => setNewTimecard(p => ({ ...p, kitRentalRate: e.target.value }))} placeholder="0" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Notes</label>
-                  <Input value={newTimecard.description} onChange={e => setNewTimecard(p => ({ ...p, description: e.target.value }))} placeholder="Meal penalty, etc." />
-                </div>
-                <div className="space-y-1 col-span-2">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Your Name</label>
-                  <Input value={newTimecard.workerName} onChange={e => setNewTimecard(p => ({ ...p, workerName: e.target.value }))} placeholder="Full name" />
-                </div>
-                <div className="space-y-1 col-span-2">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Your Email</label>
-                  <Input type="email" value={newTimecard.workerEmail} onChange={e => setNewTimecard(p => ({ ...p, workerEmail: e.target.value }))} placeholder="email@example.com" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">SS Last 4</label>
-                  <Input value={newTimecard.last4SS} onChange={e => setNewTimecard(p => ({ ...p, last4SS: e.target.value.replace(/\D/g, "").slice(0, 4) }))} placeholder="1234" className="font-mono tracking-widest" />
-                </div>
-              </div>
-
-              {/* Signature section */}
-              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3">
-                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Employee Signature</div>
-                <div className="flex gap-3 flex-wrap">
-                  <div className="space-y-1 flex-1 min-w-[160px]">
-                    <label className="text-[10px] text-slate-400">Font Style</label>
-                    <select value={newTimecard.signatureFont} onChange={e => setNewTimecard(p => ({ ...p, signatureFont: e.target.value }))}
-                      className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
-                      {SIGNATURE_FONTS.map(f => <option key={f} value={f}>{f}</option>)}
-                    </select>
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[10px] text-slate-400">Signature Date</label>
-                    <Input type="date" value={newTimecard.signatureDate} onChange={e => setNewTimecard(p => ({ ...p, signatureDate: e.target.value }))} className="w-40" />
-                  </div>
-                </div>
-                {newTimecard.workerName ? (
-                  <div className="rounded-lg border border-slate-200 bg-white px-5 py-3">
-                    <div style={{ fontFamily: `'${newTimecard.signatureFont}', cursive`, fontSize: "32px", color: "#1e293b", lineHeight: 1.3 }}>
-                      {newTimecard.workerName}
-                    </div>
-                    {newTimecard.signatureDate && (
-                      <div className="text-sm text-slate-700 mt-1">
-                        {new Date(newTimecard.signatureDate + "T12:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
-                      </div>
-                    )}
-                    <div className="text-[10px] text-slate-400 mt-1">{newTimecard.signatureFont}</div>
-                  </div>
-                ) : (
-                  <div className="text-[11px] text-slate-400 italic">Enter your name above to preview signature</div>
-                )}
-              </div>
-
-              {/* 7-day time grid */}
-              <div className="overflow-x-auto rounded-xl border border-slate-200">
-                <table className="w-full min-w-[700px] text-xs border-collapse">
-                  <thead>
-                    <tr className="bg-slate-50 border-b border-slate-200">
-                      <th className="text-left px-3 py-2 text-[10px] font-bold text-slate-400 uppercase w-24 border-r border-slate-200">Field</th>
-                      {newTimecard.days.map((d, i) => {
-                        const hasData = !!(d.call || d.wrap);
-                        const hours = calcDayHours(d);
-                        const isWeekend = (i === 0 || i === 6);
-                        return (
-                          <th key={i} className={`text-center px-1 py-1.5 border-r border-slate-100 last:border-r-0 min-w-[92px] ${hasData ? "bg-blue-50" : isWeekend ? "bg-amber-50" : ""}`}>
-                            <div className={`font-bold text-xs ${isWeekend ? "text-amber-600" : "text-slate-700"}`}>{d.day}</div>
-                            <div className={`text-[10px] mt-0.5 font-normal ${isWeekend ? "text-amber-500" : "text-slate-400"}`}>
-                              {new Date(d.date + "T12:00").toLocaleDateString("en-US", { month: "numeric", day: "numeric" })}
-                            </div>
-                            {hours > 0 && <div className="text-[10px] font-bold text-blue-600 mt-0.5">{hours}h</div>}
-                            {i > 0 && (
-                              <button
-                                type="button"
-                                title="Copy times from previous day"
-                                onClick={() => setNewTimecard(p => {
-                                  const prev = p.days[i - 1];
-                                  const updated = p.days.map((day, idx) => idx !== i ? day : {
-                                    ...day,
-                                    call: prev.call, meal1Out: prev.meal1Out, meal1In: prev.meal1In,
-                                    meal2Out: prev.meal2Out, meal2In: prev.meal2In, wrap: prev.wrap,
-                                  });
-                                  return { ...p, days: updated };
-                                })}
-                                className="mt-1 text-[9px] text-slate-400 hover:text-blue-500 hover:bg-blue-50 border border-slate-200 hover:border-blue-300 rounded px-1 py-0.5 leading-none transition-colors"
-                              >⬅ copy</button>
-                            )}
-                          </th>
-                        );
-                      })}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[
-                      { label: "Call", key: "call", type: "time" },
-                      { label: "Meal 1 Out", key: "meal1Out", type: "time" },
-                      { label: "Meal 1 In", key: "meal1In", type: "time" },
-                      { label: "Meal 2 Out", key: "meal2Out", type: "time" },
-                      { label: "Meal 2 In", key: "meal2In", type: "time" },
-                      { label: "Wrap", key: "wrap", type: "text" },
-                    ].map(({ label, key, type }, rowIdx) => (
-                      <tr key={key} className={rowIdx % 2 === 0 ? "bg-white" : "bg-slate-50/60"}>
-                        <td className="px-3 py-1.5 text-[10px] font-bold text-slate-500 uppercase border-r border-slate-200 whitespace-nowrap">
-                          {label}
-                          {key === "wrap" && <span className="ml-1 text-slate-300 font-normal normal-case">(27:18=3:18am)</span>}
-                        </td>
-                        {newTimecard.days.map((d, i) => {
-                          const isWeekend = (i === 0 || i === 6);
-                          const isNextDay = key === "wrap" && d[key] && parseInt(d[key].split(":")[0], 10) >= 24;
-                          return (
-                            <td key={i} className={`px-1 py-1 border-r border-slate-100 last:border-r-0 ${isWeekend ? "bg-amber-50/60" : ""}`}>
-                              <input type={type} value={d[key]}
-                                placeholder={key === "wrap" ? "--:--" : undefined}
-                                title={key === "wrap" ? "For next-day wraps use hours > 23, e.g. 27:18 = 3:18am" : undefined}
-                                onChange={e => setNewTimecard(p => ({ ...p, days: p.days.map((day, idx) => idx !== i ? day : { ...day, [key]: e.target.value }) }))}
-                                className={`w-full text-xs border rounded px-1 py-0.5 text-center focus:outline-none focus:border-blue-400 ${isNextDay ? "border-violet-300 bg-violet-50 text-violet-700 font-medium" : isWeekend ? "border-amber-200 bg-amber-50" : "border-slate-200 bg-white"}`} />
-                              {isNextDay && <div className="text-[9px] text-violet-500 text-center leading-none mt-0.5">+next day</div>}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
-                    <tr className="bg-sky-50 border-t border-sky-200">
-                      <td className="px-3 py-1.5 text-[10px] font-bold text-sky-700 uppercase border-r border-slate-200 whitespace-nowrap">Day Type</td>
-                      {newTimecard.days.map((d, i) => {
-                        const isWeekend = i === 0 || i === 6;
-                        return (
-                          <td key={i} className={`px-1 py-1.5 border-r border-slate-100 last:border-r-0 text-center ${isWeekend ? "bg-amber-50/60" : ""}`}>
-                            <select value={d.type || "work"}
-                              onChange={e => setNewTimecard(p => ({ ...p, days: p.days.map((day, idx) => idx !== i ? day : { ...day, type: e.target.value }) }))}
-                              className="w-full text-[10px] border border-sky-200 rounded px-0.5 py-0.5 bg-white focus:outline-none focus:border-blue-400 text-slate-700">
-                              <option value="work">Work</option>
-                              <option value="hold">Hold</option>
-                              <option value="travel">Travel</option>
-                              <option value="off">Off</option>
-                            </select>
-                          </td>
-                        );
-                      })}
-                    </tr>
-                    <tr className="bg-orange-50 border-t border-orange-200">
-                      <td className="px-3 py-1.5 text-[10px] font-bold text-orange-700 uppercase border-r border-slate-200 whitespace-nowrap">Meal Penalty</td>
-                      {newTimecard.days.map((d, i) => {
-                        const isWeekend = i === 0 || i === 6;
-                        return (
-                          <td key={i} className={`px-1 py-1.5 border-r border-slate-100 last:border-r-0 text-center ${isWeekend ? "bg-amber-50/60" : ""}`}>
-                            <input
-                              type="checkbox"
-                              checked={!!d.mealPenalty}
-                              onChange={e => setNewTimecard(p => ({ ...p, days: p.days.map((day, idx) => idx !== i ? day : { ...day, mealPenalty: e.target.checked }) }))}
-                              className="w-4 h-4 rounded accent-orange-500 cursor-pointer"
-                              title={d.mealPenalty ? "Meal penalty flagged" : "Check to flag meal penalty"}
-                            />
-                          </td>
-                        );
-                      })}
-                    </tr>
-                    <tr className="bg-violet-50 border-t border-violet-200">
-                      <td className="px-3 py-1.5 text-[10px] font-bold text-violet-700 uppercase border-r border-slate-200 whitespace-nowrap">
-                        Work Per Diem
-                        {parseFloat(newTimecard.workPerDiem) > 0 && (() => {
-                          const wRate = parseFloat(newTimecard.workPerDiem);
-                          const wCount = newTimecard.days.filter(d => d.perDiemWork).length;
-                          return (<>
-                            <div className="text-[9px] font-normal normal-case text-violet-400">{"$" + wRate.toLocaleString(undefined, { minimumFractionDigits: 2 }) + "/day"}</div>
-                            {wCount > 0 && <div className="text-[9px] font-normal normal-case text-violet-500">{wCount + " day" + (wCount !== 1 ? "s" : "") + " = $" + (wRate * wCount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>}
-                          </>);
-                        })()}
-                      </td>
-                      {newTimecard.days.map((d, i) => {
-                        const isWeekend = i === 0 || i === 6;
-                        return (
-                          <td key={i} className={`px-1 py-1.5 border-r border-slate-100 last:border-r-0 text-center ${isWeekend ? "bg-amber-50/60" : ""}`}>
-                            <input
-                              type="checkbox"
-                              checked={!!d.perDiemWork}
-                              onChange={e => setNewTimecard(p => ({ ...p, days: p.days.map((day, idx) => idx !== i ? day : { ...day, perDiemWork: e.target.checked, perDiemOff: e.target.checked ? false : day.perDiemOff }) }))}
-                              className="w-4 h-4 rounded accent-violet-500 cursor-pointer"
-                              title="Apply work day per diem to this day"
-                            />
-                          </td>
-                        );
-                      })}
-                    </tr>
-                    <tr className="bg-teal-50 border-t border-teal-200">
-                      <td className="px-3 py-1.5 text-[10px] font-bold text-teal-700 uppercase border-r border-slate-200 whitespace-nowrap">
-                        Day Off Per Diem
-                        {parseFloat(newTimecard.daysOffPerDiem) > 0 && (() => {
-                          const oRate = parseFloat(newTimecard.daysOffPerDiem);
-                          const oCount = newTimecard.days.filter(d => d.perDiemOff).length;
-                          return (<>
-                            <div className="text-[9px] font-normal normal-case text-teal-400">{"$" + oRate.toLocaleString(undefined, { minimumFractionDigits: 2 }) + "/day"}</div>
-                            {oCount > 0 && <div className="text-[9px] font-normal normal-case text-teal-600">{oCount + " day" + (oCount !== 1 ? "s" : "") + " = $" + (oRate * oCount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>}
-                          </>);
-                        })()}
-                      </td>
-                      {newTimecard.days.map((d, i) => {
-                        const isWeekend = i === 0 || i === 6;
-                        return (
-                          <td key={i} className={`px-1 py-1.5 border-r border-slate-100 last:border-r-0 text-center ${isWeekend ? "bg-amber-50/60" : ""}`}>
-                            <input
-                              type="checkbox"
-                              checked={!!d.perDiemOff}
-                              onChange={e => setNewTimecard(p => ({ ...p, days: p.days.map((day, idx) => idx !== i ? day : { ...day, perDiemOff: e.target.checked, perDiemWork: e.target.checked ? false : day.perDiemWork }) }))}
-                              className="w-4 h-4 rounded accent-teal-500 cursor-pointer"
-                              title="Apply day off per diem to this day"
-                            />
-                          </td>
-                        );
-                      })}
-                    </tr>
-                    <tr className="bg-emerald-50 border-t border-emerald-200">
-                      <td className="px-3 py-1.5 text-[10px] font-bold text-emerald-700 uppercase border-r border-slate-200 whitespace-nowrap">Daily Total</td>
-                      {(() => {
-                        const sixthIdx = get6thDayIndex(newTimecard.days);
-                        const seventhIdx = get7thDayIndex(newTimecard.days);
-                        const rate = parseFloat(newTimecard.rate) || 0;
-                        const guarH = parseFloat(newTimecard.guarHours) || 0;
-                        const wPD = parseFloat(newTimecard.workPerDiem) || 0;
-                        const oPD = parseFloat(newTimecard.daysOffPerDiem) || 0;
-                        return newTimecard.days.map((d, i) => {
-                          const h = calcDayHours(d);
-                          const paidH = h > 0 ? Math.max(h, guarH) : 0;
-                          const ot = i === seventhIdx ? calcOTBreakdown7thDay(paidH) : i === sixthIdx ? calcOTBreakdown6thDay(paidH) : calcOTBreakdown(paidH);
-                          const perDiem = (d.perDiemWork ? wPD : 0) + (d.perDiemOff ? oPD : 0);
-                          const dayTotal = ot.hours1x * rate + ot.hours15x * rate * 1.5 + ot.hours2x * rate * 2 + (d.mealPenalty ? rate : 0) + perDiem;
-                          const isWeekend = i === 0 || i === 6;
-                          return (
-                            <td key={i} className={`px-1 py-1.5 text-center border-r border-slate-100 last:border-r-0 ${isWeekend ? "bg-amber-50/60" : ""}`}>
-                              {(paidH > 0 || perDiem > 0)
-                                ? <span className="text-xs font-bold text-emerald-700">${dayTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                                : <span className="text-slate-300 text-xs">—</span>}
-                            </td>
-                          );
-                        });
-                      })()}
-                    </tr>
-                    <tr className="bg-blue-600 border-t-2 border-blue-700">
-                      <td className="px-3 py-2 text-[10px] font-bold text-blue-100 uppercase border-r border-blue-500">Total Hrs</td>
-                      {(() => {
-                        const sixthIdx = get6thDayIndex(newTimecard.days);
-                        const seventhIdx = get7thDayIndex(newTimecard.days);
-                        const guarH = parseFloat(newTimecard.guarHours) || 0;
-                        return newTimecard.days.map((d, i) => {
-                          const h = calcDayHours(d);
-                          const paidH = h > 0 ? Math.max(h, guarH) : 0;
-                          const is6th = i === sixthIdx;
-                          const is7th = i === seventhIdx;
-                          const ot = is7th ? calcOTBreakdown7thDay(paidH) : is6th ? calcOTBreakdown6thDay(paidH) : calcOTBreakdown(paidH);
-                          const isWeekend = i === 0 || i === 6;
-                          return (
-                            <td key={i} className={`px-1 py-2 text-center border-r border-blue-500 last:border-r-0 ${isWeekend ? "bg-blue-700" : ""}`}>
-                              <div className={`font-bold text-sm ${paidH > 0 ? "text-white" : "text-blue-400"}`}>{paidH > 0 ? paidH : "—"}</div>
-                              {is7th && paidH > 0 && <div className="text-[9px] text-rose-300 font-bold">7th day</div>}
-                              {is6th && paidH > 0 && <div className="text-[9px] text-cyan-300 font-bold">6th day</div>}
-                              {ot.hours15x > 0 && <div className="text-[9px] text-amber-300 font-medium">{ot.hours15x}h @1.5×</div>}
-                              {ot.hours2x > 0 && <div className="text-[9px] text-red-300 font-medium">{ot.hours2x}h @2×</div>}
-                            </td>
-                          );
-                        });
-                      })()}
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Summary + submit */}
-              <div className="flex items-center justify-between mt-4 flex-wrap gap-3">
-                <div className="flex items-center gap-6 text-sm">
-                  {(() => {
-                    const guarHours = parseFloat(newTimecard.guarHours) || 0;
-                    const totalHrs = parseFloat(newTimecard.days.reduce((a, d) => a + calcDayHours(d), 0).toFixed(2));
-                    const rate = parseFloat(newTimecard.rate) || 0;
-                    const total = parseFloat((totalHrs * rate).toFixed(2));
-                    const workDays = newTimecard.days.filter(d => calcDayHours(d) > 0).length;
-                    return (
-                      <>
-                        <div><span className="text-slate-400">Days worked: </span><span className="font-bold text-slate-800">{workDays}</span></div>
-                        <div><span className="text-slate-400">Week total: </span><span className="font-bold text-slate-800">{totalHrs} hrs</span></div>
-                        {rate > 0 && <div><span className="text-slate-400">Gross est.: </span><span className="font-bold text-blue-700">${total.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>}
-                      </>
-                    );
-                  })()}
-                </div>
-                <Button onClick={addTimecard} disabled={!newTimecard.company || !newTimecard.rate}>
-                  <Plus size={16} className="mr-1.5" /> Add Timecard
-                </Button>
-              </div>
-            </Card>
-
-            {/* Job selector for upcoming upload */}
-            <div className="flex items-center gap-3 flex-wrap">
-              <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Upload to job</span>
-              <select value={uploadJobId} onChange={e => setUploadJobId(e.target.value)}
-                className="text-sm border border-slate-200 rounded-lg px-3 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
-                <option value="">— Unassigned —</option>
-                {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
-              </select>
-            </div>
-
-            {/* Jobs list */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xl font-bold">Time Entries — {selectedYear}</h3>
-                <div className="flex items-center gap-2">
-                  {showNewJobForm ? (
-                    <form onSubmit={e => { e.preventDefault(); if (newJobName.trim()) { addJob(newJobName); setNewJobName(""); setShowNewJobForm(false); } }} className="flex gap-2">
-                      <Input value={newJobName} onChange={e => setNewJobName(e.target.value)} placeholder="Job name" className="w-48 h-8 text-sm" autoFocus />
-                      <Button type="submit" className="h-8 text-xs px-3">Save</Button>
-                      <Button type="button" variant="ghost" onClick={() => { setShowNewJobForm(false); setNewJobName(""); }} className="h-8 text-xs px-2">Cancel</Button>
-                    </form>
-                  ) : (
-                    <Button variant="outline" onClick={() => setShowNewJobForm(true)} className="h-8 text-xs"><Plus size={13} className="mr-1" />New Job</Button>
-                  )}
-                  <Button variant="outline" onClick={() => {
-                    const header = ["Week Ending", "Company", "Job Name", "Classification", "Rate/hr", "Day Rate", "Hours", "Total", "Meal Penalty Pay", "Per Diem Total", "Kit Rental Pay", "Mileage", "Status"];
-                    const rows = filteredTimecards.map(tc => [tc.date || "", tc.company || "", tc.jobName || "", tc.jobClassification || "", tc.rate || 0, tc.dayRate || 0, tc.hours || 0, tc.total || 0, tc.mealPenaltyPay || 0, tc.perDiemTotal || 0, tc.kitRentalPay || 0, tc.mileage || 0, tc.status || ""]);
-                    downloadCSV([header, ...rows], `timecards_${selectedYear}.csv`);
-                  }} className="h-8 text-xs gap-1.5"><FileDown size={13} />CSV</Button>
-                </div>
-              </div>
-
-              {(() => {
-                const jobGroups = [
-                  ...jobs.map(j => ({ ...j, items: filteredTimecards.filter(t => t.jobId === j.id) })),
-                  { id: "", name: "Unassigned", items: filteredTimecards.filter(t => !t.jobId || !jobs.find(j => j.id === t.jobId)) },
-                ].filter(g => sq ? g.items.length > 0 : (g.items.length > 0 || g.id !== ""));
-
-                if (jobGroups.every(g => g.items.length === 0)) {
-                  return (
-                    <div className="py-20 text-center bg-white border-2 border-dashed border-slate-200 rounded-2xl">
-                      <div className="bg-slate-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300"><Clock size={32} /></div>
-                      <h4 className="text-slate-900 font-semibold">{sq ? `No time entries match "${sq}"` : `No time entries for ${selectedYear}`}</h4>
-                      <p className="text-slate-500 text-sm">{sq ? "Try a different search term." : (selectedYear === currentYear ? "Log hours using the form above, or upload a timecard PDF/image." : "No time was logged for this year.")}</p>
-                    </div>
-                  );
-                }
-
-                return jobGroups.map(group => {
-                  if (group.items.length === 0) return null;
-                  const isExpanded = sq || group.id === "" ? true : expandedJobs.has(group.id);
-                  const groupHours = group.items.reduce((a, b) => a + (b.hours || 0), 0);
-                  const groupEarnings = group.items.reduce((a, b) => a + (b.total || 0), 0);
-                  return (
-                    <div key={group.id || "unassigned"} className="border border-slate-200 rounded-xl overflow-hidden bg-white">
-                      <div className="flex items-center justify-between px-4 py-3 bg-slate-50 border-b border-slate-200 cursor-pointer select-none"
-                        onClick={() => group.id && toggleJobExpanded(group.id)}>
-                        <div className="flex items-center gap-2">
-                          {group.id ? (
-                            isExpanded ? <ChevronDown size={16} className="text-slate-400" /> : <ChevronRight size={16} className="text-slate-400" />
-                          ) : <span className="w-4" />}
-                          <Briefcase size={15} className="text-slate-400" />
-                          <span className="font-semibold text-slate-800 text-sm">{group.name}</span>
-                          <span className="text-xs text-slate-400">({group.items.length} entr{group.items.length !== 1 ? "ies" : "y"})</span>
-                        </div>
-                        <div className="flex items-center gap-4 text-xs font-medium">
-                          <span className="text-slate-500">{groupHours.toFixed(1)} hrs</span>
-                          <span className="text-blue-600 font-bold">${groupEarnings.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                          {group.id && <Button variant="danger" onClick={e => { e.stopPropagation(); deleteJob(group.id); }} className="!p-1 ml-1" title="Delete job"><Trash2 size={13} /></Button>}
-                        </div>
-                      </div>
-                      {isExpanded && (
-                        <div className="p-4">
-                          {group.items.length === 0 ? (
-                            <p className="text-sm text-slate-400 text-center py-6">No time entries in this job yet. Select it in "Upload to job" or pick it in the form above.</p>
-                          ) : (
-                            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                              {group.items.map((entry) => {
-                                const idx = timecards.findIndex(t => t.id === entry.id);
-                                return (<Card key={entry.id} id={entry.id} className={`transition-all flex flex-col ${entry.locked ? "border-amber-200 bg-amber-50/20" : "hover:border-blue-200"} ${highlightedId === entry.id ? "ring-2 ring-violet-500 border-violet-400" : ""}`}>
-                                  <div className="flex-1 flex flex-col">
-                                    {/* Card header */}
-                                    <div className="p-4 space-y-2">
-                                      <div className="flex justify-between items-start">
-                                        <div className={`px-2.5 py-1 rounded-md text-xs font-bold uppercase tracking-wider ${entry.status === "Paid" ? "bg-emerald-100 text-emerald-700" : entry.status === "Partially Paid" ? "bg-orange-100 text-orange-700" : "bg-amber-100 text-amber-700"}`}>{entry.status}</div>
-                                        <div className="flex items-center gap-1">
-                                          <button
-                                            onClick={() => { const n = [...timecards]; n[idx] = { ...n[idx], locked: !n[idx].locked }; setTimecards(n); }}
-                                            className={`p-1.5 rounded-lg transition-colors ${entry.locked ? "text-amber-600 bg-amber-100 hover:bg-amber-200" : "text-slate-300 hover:text-slate-500 hover:bg-slate-100"}`}
-                                            title={entry.locked ? "Unlock entry to edit" : "Lock entry to prevent edits"}>
-                                            {entry.locked ? <Lock size={13} /> : <LockOpen size={13} />}
-                                          </button>
-                                          <select value={entry.jobId || ""} onChange={e => { const n = [...timecards]; n[idx] = { ...n[idx], jobId: e.target.value }; setTimecards(n); }}
-                                            disabled={!!entry.locked}
-                                            className="text-[10px] border border-slate-200 rounded px-1.5 py-0.5 bg-white text-slate-500 focus:outline-none max-w-[100px] disabled:opacity-50 disabled:cursor-not-allowed" title="Move to job">
-                                            <option value="">Unassigned</option>
-                                            {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
-                                          </select>
-                                          <Button variant="danger" onClick={() => deleteTimecard(entry.id)} className="!p-1.5"><Trash2 size={14} /></Button>
-                                        </div>
-                                      </div>
-                                      <div>
-                                        <p className="font-semibold text-slate-800">{entry.company}</p>
-                                        {entry.jobName && <p className="text-xs text-blue-600 font-medium mt-0.5">{entry.jobName}</p>}
-                                        {entry.jobClassification && <p className="text-xs text-slate-400">{entry.jobClassification}</p>}
-                                        {entry.description && <p className="text-xs text-slate-400 mt-0.5 truncate">{entry.description}</p>}
-                                      </div>
-                                      <div className="flex items-center gap-3 text-xs text-slate-400">
-                                        <span>Week ending: <span className="font-semibold text-slate-600">{entry.date}</span></span>
-                                        {entry.guarHours > 0 && <span>Guar. <span className="font-semibold text-slate-600">{entry.guarHours}h</span></span>}
-                                        {entry.rate > 0 && <span>${entry.rate}/hr</span>}
-                                      </div>
-                                      {/* Turnaround / meal penalty warnings */}
-                                      {(() => {
-                                        const turnaroundViolations = entry.days ? calcTurnaroundViolations(entry.days) : new Set();
-                                        const autoMealDays = entry.days ? entry.days.filter(d => !d.mealPenalty && shouldAutoMealPenalty(d)) : [];
-                                        if (turnaroundViolations.size === 0 && autoMealDays.length === 0) return null;
-                                        return (
-                                          <div className="flex flex-wrap gap-1.5 mt-1">
-                                            {turnaroundViolations.size > 0 && (
-                                              <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold" title="< 10h between wrap and next call">⏰ {turnaroundViolations.size} turnaround violation{turnaroundViolations.size !== 1 ? "s" : ""}</span>
-                                            )}
-                                            {autoMealDays.length > 0 && (
-                                              <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold" title="No meal break logged within 6h of call">🍽 {autoMealDays.length} possible meal penalty</span>
-                                            )}
-                                          </div>
-                                        );
-                                      })()}
-                                    </div>
-                                    {/* 7-day calendar */}
-                                    {entry.days?.length > 0 ? (
-                                      <div className="overflow-x-auto border-t border-slate-100">
-                                        <table className="w-full min-w-[360px] text-[11px] border-collapse">
-                                          <thead>
-                                            <tr className="bg-slate-50 border-b border-slate-200">
-                                              <th className="px-2 py-1.5 text-left text-[10px] font-bold text-slate-400 uppercase border-r border-slate-200 w-[70px]">Day</th>
-                                              <th className="px-1.5 py-1.5 text-center text-[10px] font-bold text-slate-400 border-r border-slate-100">Call</th>
-                                              <th className="px-1.5 py-1.5 text-center text-[10px] font-bold text-slate-400 border-r border-slate-100">Wrap</th>
-                                              <th className="px-1.5 py-1.5 text-center text-[10px] font-bold text-slate-400 border-r border-slate-100">Hrs</th>
-                                              <th className="px-1.5 py-1.5 text-center text-[10px] font-bold text-slate-400 border-r border-slate-100">OT</th>
-                                              <th className="px-1.5 py-1.5 text-center text-[10px] font-bold text-orange-400">MP</th>
-                                            </tr>
-                                          </thead>
-                                          <tbody>
-                                            {entry.days.map(d => {
-                                              const hasWork = d.totalHours > 0 || d.call;
-                                              return (
-                                                <tr key={d.date} className={`border-t border-slate-100 ${hasWork ? "bg-blue-50/50" : ""}`}>
-                                                  <td className="px-2 py-1.5 border-r border-slate-200 whitespace-nowrap">
-                                                    <span className="font-bold text-slate-700">{d.day}</span>
-                                                    <span className="text-slate-400 ml-1 text-[10px]">{new Date(d.date + "T12:00").toLocaleDateString("en-US", { month: "numeric", day: "numeric" })}</span>
-                                                  </td>
-                                                  <td className="px-1.5 py-1.5 text-center text-slate-500 border-r border-slate-100">{d.call || <span className="text-slate-300">—</span>}</td>
-                                                  <td className="px-1.5 py-1.5 text-center text-slate-500 border-r border-slate-100">{d.wrap || <span className="text-slate-300">—</span>}</td>
-                                                  <td className="px-1.5 py-1.5 text-center border-r border-slate-100 font-bold">
-                                                    {d.totalHours > 0 ? <span className="text-blue-700">{d.totalHours}h</span> : <span className="text-slate-300">—</span>}
-                                                  </td>
-                                                  <td className="px-1.5 py-1.5 text-center text-[10px]">
-                                                    {d.hours2x > 0 && <span className="text-red-500 font-medium">{d.hours2x}×2 </span>}
-                                                    {d.hours15x > 0 && <span className="text-amber-500 font-medium">{d.hours15x}×1.5</span>}
-                                                    {!d.hours15x && !d.hours2x && d.totalHours > 0 && <span className="text-slate-400">st</span>}
-                                                    {!d.totalHours && <span className="text-slate-300">—</span>}
-                                                  </td>
-                                                  <td className="px-1.5 py-1.5 text-center">
-                                                    {d.mealPenalty
-                                                      ? <span className="text-orange-500 font-bold text-[10px]" title="Meal penalty">⚠ MP</span>
-                                                      : <span className="text-slate-200 text-[10px]">—</span>}
-                                                  </td>
-                                                </tr>
-                                              );
-                                            })}
-                                          </tbody>
-                                          <tfoot>
-                                            <tr className="bg-blue-600 text-white text-[11px] font-bold">
-                                              <td colSpan={3} className="px-2 py-1.5 border-r border-blue-500">Week Total (Hours)</td>
-                                              <td className="px-1.5 py-1.5 text-center border-r border-blue-500">{entry.hours}h</td>
-                                              <td className="px-1.5 py-1.5 text-center border-r border-blue-500">${(entry.total - (entry.mealPenaltyPay || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                                              <td className="px-1.5 py-1.5 text-center text-blue-200 text-[10px]">{entry.days?.filter(d => d.mealPenalty).length > 0 ? `${entry.days.filter(d => d.mealPenalty).length} day${entry.days.filter(d => d.mealPenalty).length !== 1 ? "s" : ""}` : "—"}</td>
-                                            </tr>
-                                            {(entry.mealPenaltyPay || 0) > 0 && (
-                                              <tr className="bg-orange-500 text-white text-[11px] font-bold">
-                                                <td colSpan={3} className="px-2 py-1.5 border-r border-orange-400">Meal Penalty ({entry.days.filter(d => d.mealPenalty).length} day{entry.days.filter(d => d.mealPenalty).length !== 1 ? "s" : ""} × 1hr base)</td>
-                                                <td className="px-1.5 py-1.5 text-center border-r border-orange-400">—</td>
-                                                <td className="px-1.5 py-1.5 text-center border-r border-orange-400">${(entry.mealPenaltyPay).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                                                <td className="px-1.5 py-1.5 text-center">—</td>
-                                              </tr>
-                                            )}
-                                            {(entry.kitRentalPay || 0) > 0 && (
-                                              <tr className="bg-purple-600 text-white text-[11px] font-bold">
-                                                <td colSpan={3} className="px-2 py-1.5 border-r border-purple-500">Kit/Box Rental ({entry.days.filter(d => d.totalHours > 0 || d.call).length}d × ${(entry.kitRentalRate || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}/day)</td>
-                                                <td className="px-1.5 py-1.5 text-center border-r border-purple-500">—</td>
-                                                <td className="px-1.5 py-1.5 text-center border-r border-purple-500">${(entry.kitRentalPay).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                                                <td className="px-1.5 py-1.5 text-center">—</td>
-                                              </tr>
-                                            )}
-                                            {((entry.mealPenaltyPay || 0) > 0 || (entry.kitRentalPay || 0) > 0) && (
-                                              <tr className="bg-blue-800 text-white text-[11px] font-bold">
-                                                <td colSpan={3} className="px-2 py-1.5 border-r border-blue-700">Total Due</td>
-                                                <td className="px-1.5 py-1.5 text-center border-r border-blue-700">—</td>
-                                                <td className="px-1.5 py-1.5 text-center border-r border-blue-700">${(entry.total || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                                                <td className="px-1.5 py-1.5 text-center">—</td>
-                                              </tr>
-                                            )}
-                                          </tfoot>
-                                        </table>
-                                      </div>
-                                    ) : (
-                                      /* Fallback for old entries without days */
-                                      <div className="px-4 py-3 border-t border-slate-100 flex gap-4 text-sm flex-wrap">
-                                        <div><p className="text-[10px] font-bold text-slate-400 uppercase">Hours</p><p className="font-semibold">{entry.hours}</p></div>
-                                        <div><p className="text-[10px] font-bold text-slate-400 uppercase">Rate</p><p className="font-semibold">${entry.rate}/hr</p></div>
-                                        <div><p className="text-[10px] font-bold text-slate-400 uppercase">Total</p><p className="font-bold text-blue-600">${(entry.total || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</p></div>
-                                      </div>
-                                    )}
-                                  </div>
-                                  {/* Payment History */}
-                                  {(() => {
-                                    const pmts = entry.payments || [];
-                                    const tcAmtRcvd = pmts.length > 0 ? pmts.reduce((a, p) => a + (parseFloat(p.amount) || 0), 0) : (parseFloat(entry.amountReceived) || 0);
-                                    const tcTotal = parseFloat(entry.total) || 0;
-                                    const ML = { ach: "ACH/Wire", check: "Check", cash: "Cash", paypal: "PayPal", zelle: "Zelle", venmo: "Venmo", other: "Other" };
-                                    if (pmts.length === 0 && tcAmtRcvd === 0 && entry.status !== "Partially Paid") return null;
-                                    return (
-                                      <div className="px-4 pb-3 space-y-1.5">
-                                        <div className="flex items-center justify-between">
-                                          <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><CreditCard size={10} />Payment History</label>
-                                          {tcAmtRcvd > 0 && <span className="text-[10px] text-slate-400">${tcAmtRcvd.toLocaleString(undefined,{minimumFractionDigits:2})} of ${tcTotal.toLocaleString(undefined,{minimumFractionDigits:2})}</span>}
-                                        </div>
-                                        {pmts.length > 0 ? (
-                                          <div className="space-y-1">
-                                            {pmts.map(pmt => (
-                                              <div key={pmt.id} className="flex items-center gap-2 px-2.5 py-1.5 bg-emerald-50 border border-emerald-100 rounded-lg text-xs">
-                                                <span className="font-mono text-slate-500 shrink-0">{pmt.date}</span>
-                                                <span className="font-bold text-emerald-700 flex-1">${(parseFloat(pmt.amount)||0).toLocaleString(undefined,{minimumFractionDigits:2})}</span>
-                                                {pmt.method && <span className="text-[9px] bg-emerald-100 text-emerald-600 border border-emerald-200 px-1.5 py-0.5 rounded font-medium">{ML[pmt.method]||pmt.method}</span>}
-                                                {!entry.locked && (
-                                                  <button onClick={() => {
-                                                    const newPmts = pmts.filter(p => p.id !== pmt.id);
-                                                    const newTotal2 = newPmts.reduce((a,p) => a+(parseFloat(p.amount)||0), 0);
-                                                    const n = [...timecards]; n[idx] = { ...n[idx], payments: newPmts, amountReceived: newTotal2, status: newTotal2 <= 0 ? "Unpaid" : newTotal2 >= tcTotal ? "Paid" : "Partially Paid" }; setTimecards(n);
-                                                  }} className="text-slate-300 hover:text-red-400 transition-colors shrink-0" title="Remove payment"><Trash2 size={11} /></button>
-                                                )}
-                                              </div>
-                                            ))}
-                                          </div>
-                                        ) : null}
-                                        {entry.status === "Partially Paid" && (
-                                          <p className="text-[11px] text-orange-600 font-semibold">Balance owed: ${Math.max(0, tcTotal - tcAmtRcvd).toLocaleString(undefined,{minimumFractionDigits:2})}</p>
-                                        )}
-                                      </div>
-                                    );
-                                  })()}
-                                  <div className="p-3 bg-slate-50 border-t border-slate-100 flex gap-2 flex-wrap">
-                                    <Button variant="outline" className="flex-none" title={entry.locked ? "Unlock entry to edit" : "Edit timecard"} disabled={!!entry.locked}
-                                      onClick={() => setEditingTimecard({ ...entry, rate: String(entry.rate), guarHours: String(entry.guarHours || ""), dayRate: String(entry.dayRate || ""), dayRateType: entry.dayRateType || "10", weekEnding: entry.date, days: entry.days?.length ? entry.days.map(d => ({ ...d })) : initWeekDays(entry.date) })}>
-                                      <Pencil size={14} className="mr-1.5" />Edit
-                                    </Button>
-                                    <Button variant="outline" className="flex-none" title="Download PDF" onClick={() => downloadTimecardPDF(entry)}>
-                                      <Download size={14} className="mr-1.5" />PDF
-                                    </Button>
-                                    <Button variant="outline" className="flex-none text-violet-600 border-violet-200 hover:bg-violet-50" title="Export to payroll portal (EP, GreenSlate, CAPS)" onClick={() => { setExportEntry(entry); setShowExportModal(true); }}>
-                                      <FileDown size={14} className="mr-1.5" />Export
-                                    </Button>
-                                    {blobCache.current.has(entry.id) && (
-                                      <Button variant="outline" className="flex-none" onClick={() => setPreviewItem(entry)} title="Preview timecard">
-                                        <Eye size={15} className="mr-1.5" /> View
-                                      </Button>
-                                    )}
-                                    {entry.status !== "Paid" ? (
-                                      <Button variant="success" className="flex-1" onClick={() => {
-                                        setMarkPaidModal({ type: "timecard", id: entry.id, idx, amount: parseFloat(entry.total) || 0, existingPayments: entry.payments || [] });
-                                        setMarkPaidMode(null);
-                                        setMarkPaidPartialAmt("");
-                                        setMarkPaidDate(new Date().toISOString().split("T")[0]);
-                                        setMarkPaidMethod("");
-                                      }}>Mark as Paid</Button>
-                                    ) : (
-                                      <Button variant="outline" className="flex-1 text-emerald-600 border-emerald-200 hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-colors group" onClick={() => { const n = [...timecards]; n[idx] = { ...n[idx], status: "Unpaid", amountReceived: 0, payments: [] }; setTimecards(n); }} title="Click to mark as unpaid">
-                                        <CheckCircle size={16} className="mr-1.5 group-hover:hidden" />
-                                        <X size={16} className="mr-1.5 hidden group-hover:inline" />
-                                        <span className="group-hover:hidden">Paid</span>
-                                        <span className="hidden group-hover:inline">Mark Unpaid</span>
-                                      </Button>
-                                    )}
-                                    {!entry.paystub ? (
-                                      <div className="relative flex-none">
-                                        <input type="file" accept="image/*,application/pdf" className="absolute inset-0 opacity-0 w-full h-full cursor-pointer"
-                                          onChange={e => { if (e.target.files[0]) handleTimecardPaystubUpload(entry.id, e.target.files[0]); e.target.value = ""; }}
-                                          disabled={paystubUploading === entry.id} />
-                                        <Button variant="outline" disabled={paystubUploading === entry.id} className="text-blue-600 border-blue-200 hover:bg-blue-50 whitespace-nowrap">
-                                          {paystubUploading === entry.id ? <><Loader2 size={13} className="animate-spin mr-1.5" />Reading...</> : <><UploadCloud size={13} className="mr-1.5" />Paystub</>}
-                                        </Button>
-                                      </div>
-                                    ) : (
-                                      <Button variant="outline" className="flex-none text-emerald-600 border-emerald-200 hover:bg-emerald-50 whitespace-nowrap"
-                                        onClick={() => setPreviewItem({ ...entry, id: "tc_paystub_" + entry.id, fileName: entry.paystub.fileName, fileId: entry.paystub.fileId, fileType: entry.paystub.fileType })}>
-                                        <CheckCircle size={13} className="mr-1.5" />Paystub
-                                      </Button>
-                                    )}
-                                  </div>
-                                  {entry.paystub && (
-                                    <div className="px-5 pb-4">
-                                      <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 space-y-1.5">
-                                        <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider flex items-center gap-1.5"><CheckCircle size={11} />Paystub Verified</p>
-                                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                                          {entry.paystub.grossPay > 0 && <div><span className="text-slate-400">Gross Pay </span><span className="font-semibold text-slate-700">${entry.paystub.grossPay.toLocaleString(undefined,{minimumFractionDigits:2})}</span></div>}
-                                          {entry.paystub.netPay > 0 && <div><span className="text-slate-400">Net Pay </span><span className="font-semibold text-slate-700">${entry.paystub.netPay.toLocaleString(undefined,{minimumFractionDigits:2})}</span></div>}
-                                          {entry.paystub.payDate && <div><span className="text-slate-400">Pay Date </span><span className="font-semibold text-slate-700">{entry.paystub.payDate}</span></div>}
-                                          {entry.paystub.checkNumber && <div><span className="text-slate-400">Check # </span><span className="font-semibold text-slate-700 font-mono">{entry.paystub.checkNumber}</span></div>}
-                                        </div>
-                                        <button onClick={() => { setTimecards(prev => prev.map(tc => tc.id === entry.id ? { ...tc, paystub: undefined } : tc)); URL.revokeObjectURL(blobCache.current.get("tc_paystub_" + entry.id)?.url); blobCache.current.delete("tc_paystub_" + entry.id); }}
-                                          className="text-[10px] text-red-400 hover:text-red-600 mt-1">Remove paystub</button>
-                                      </div>
-                                    </div>
-                                  )}
-                                </Card>);
-                              })}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                });
-              })()}
-            </div>
-          </>
+          <TimecardsTab
+            totalTimecardHours={totalTimecardHours}
+            totalTimecardEarnings={totalTimecardEarnings}
+            totalTimecardInvoiced={totalTimecardInvoiced}
+            showClassificationManager={showClassificationManager}
+            setShowClassificationManager={setShowClassificationManager}
+            classifications={classifications}
+            setClassifications={setClassifications}
+            newClassificationName={newClassificationName}
+            setNewClassificationName={setNewClassificationName}
+            newTimecard={newTimecard}
+            setNewTimecard={setNewTimecard}
+            clients={clients}
+            jobs={jobs}
+            addTimecard={addTimecard}
+            uploadJobId={uploadJobId}
+            setUploadJobId={setUploadJobId}
+            showNewJobForm={showNewJobForm}
+            setShowNewJobForm={setShowNewJobForm}
+            newJobName={newJobName}
+            setNewJobName={setNewJobName}
+            addJob={addJob}
+            filteredTimecards={filteredTimecards}
+            selectedYear={selectedYear}
+            currentYear={currentYear}
+            sq={sq}
+            expandedJobs={expandedJobs}
+            toggleJobExpanded={toggleJobExpanded}
+            timecards={timecards}
+            setTimecards={setTimecards}
+            highlightedId={highlightedId}
+            deleteTimecard={deleteTimecard}
+            downloadTimecardPDF={downloadTimecardPDF}
+            setEditingTimecard={setEditingTimecard}
+            setExportEntry={setExportEntry}
+            setShowExportModal={setShowExportModal}
+            blobCache={blobCache}
+            setPreviewItem={setPreviewItem}
+            setMarkPaidModal={setMarkPaidModal}
+            setMarkPaidMode={setMarkPaidMode}
+            setMarkPaidPartialAmt={setMarkPaidPartialAmt}
+            setMarkPaidDate={setMarkPaidDate}
+            setMarkPaidMethod={setMarkPaidMethod}
+            paystubUploading={paystubUploading}
+            handleTimecardPaystubUpload={handleTimecardPaystubUpload}
+            deleteJob={deleteJob}
+          />
         )}
 
         {/* ── PURCHASES ── */}
         {activeTab === "purchases" && (
-          <>
-            {/* Stats */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-              <Card className="p-6 bg-rose-50 border-rose-200">
-                <p className="text-rose-700 text-sm font-medium">Total Spent</p>
-                <h2 className="text-3xl font-bold mt-1 text-rose-700">${totalPurchases.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-              </Card>
-              <Card className="p-6">
-                <p className="text-slate-500 text-sm font-medium">Expendables</p>
-                <h2 className="text-3xl font-bold mt-1 text-rose-500">${totalExpendables.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-              </Card>
-              <Card className="p-6">
-                <p className="text-slate-500 text-sm font-medium">Equipment</p>
-                <h2 className="text-3xl font-bold mt-1 text-violet-600">${totalEquipment.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-              </Card>
-              <Card className="p-6">
-                <p className="text-slate-500 text-sm font-medium">Items Logged</p>
-                <h2 className="text-3xl font-bold mt-1 text-slate-700">{filteredPurchases.length}</h2>
-              </Card>
-            </div>
-
-            {/* Sub-tabs + Tax Report */}
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
-                <button onClick={() => { setPurchaseSubTab("expendables"); setNewPurchase(p => ({ ...p, category: "expendables" })); }}
-                  className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${purchaseSubTab === "expendables" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                  <Package size={14} className="inline mr-1.5 -mt-0.5" />Expendables
-                </button>
-                <button onClick={() => { setPurchaseSubTab("equipment"); setNewPurchase(p => ({ ...p, category: "equipment" })); }}
-                  className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${purchaseSubTab === "equipment" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                  <Wrench size={14} className="inline mr-1.5 -mt-0.5" />Equipment
-                </button>
-                <button onClick={() => { setPurchaseSubTab("meals"); setNewPurchase(p => ({ ...p, category: "meals" })); }}
-                  className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${purchaseSubTab === "meals" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                  <Utensils size={14} className="inline mr-1.5 -mt-0.5" />Meals
-                </button>
-              </div>
-              {filteredPurchases.filter(p => p.category === purchaseSubTab).length > 0 && (
-                <div className="flex items-center gap-2">
-                  <Button onClick={() => {
-                    const items = filteredPurchases.filter(p => p.category === purchaseSubTab);
-                    const header = purchaseSubTab === "meals"
-                      ? ["Date", "Description", "Vendor", "Meal Type", "Amount ($)", "Job", "Notes"]
-                      : purchaseSubTab === "equipment"
-                      ? ["Date", "Description", "Vendor", "Serial #", "Depreciation Method", "Life / Asset Class", `${selectedYear} Deduction ($)`, "Amount ($)", "Job", "Notes"]
-                      : ["Date", "Description", "Vendor", "Amount ($)", "Job", "Notes"];
-                    const rows = items.map(p => {
-                      const base = [p.date || "", p.name || "", p.vendor || ""];
-                      if (purchaseSubTab === "meals") return [...base, p.mealType === "travel_dining" ? "Travel Dining" : "Business Meeting", p.amount || 0, p.jobId ? (jobs.find(j => j.id === p.jobId)?.name || p.jobId) : "", p.notes || ""];
-                      if (purchaseSubTab === "equipment") {
-                        const method = p.depreciationMethod || "section179";
-                        const methodLabel = { "section179": "Section 179", "bonus": "Bonus Depreciation", "straight-line": "Straight-Line", "macrs": "MACRS" }[method] || method;
-                        const lifeClass = method === "straight-line" ? (p.usefulLife ? p.usefulLife + " yr" : "—") : method === "macrs" ? (p.macrsClass || "—") : "—";
-                        const deduction = calcEquipDeduction(p, selectedYear);
-                        return [...base, p.serial || "", methodLabel, lifeClass, deduction > 0 ? deduction.toFixed(2) : "0.00", p.amount || 0, p.jobId ? (jobs.find(j => j.id === p.jobId)?.name || p.jobId) : "", p.notes || ""];
-                      }
-                      return [...base, p.amount || 0, p.jobId ? (jobs.find(j => j.id === p.jobId)?.name || p.jobId) : "", p.notes || ""];
-                    });
-                    downloadCSV([header, ...rows], `${purchaseSubTab}_${selectedYear}.csv`);
-                  }} variant="outline" className="gap-1.5 border-slate-300 text-slate-600 hover:bg-slate-50">
-                    <FileDown size={14} />CSV
-                  </Button>
-                  <Button onClick={() => generateExpenseReport(purchaseSubTab)} className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white">
-                    <Receipt size={14} />Receipts PDF
-                  </Button>
-                </div>
-              )}
-            </div>
-
-            {/* Add purchase form */}
-            <Card className="p-6">
-              <h3 className="text-base font-bold mb-4">Log {purchaseSubTab === "expendables" ? "Expendable" : purchaseSubTab === "meals" ? "Meal" : "Equipment"} Purchase</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
-                <div className="space-y-1 lg:col-span-2">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Item Name</label>
-                  <Input value={newPurchase.name} onChange={e => setNewPurchase(p => ({ ...p, name: e.target.value }))} placeholder={purchaseSubTab === "expendables" ? "e.g. Gels, tape, batteries" : purchaseSubTab === "meals" ? "e.g. Client lunch, team dinner" : "e.g. Camera, lens, tripod"} />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Vendor</label>
-                  <Input value={newPurchase.vendor} onChange={e => setNewPurchase(p => ({ ...p, vendor: e.target.value }))} placeholder="B&H, Amazon…" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Amount ($)</label>
-                  <Input type="number" value={newPurchase.amount} onChange={e => setNewPurchase(p => ({ ...p, amount: e.target.value }))} placeholder="0.00" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Date</label>
-                  <Input type="date" value={newPurchase.date} onChange={e => setNewPurchase(p => ({ ...p, date: e.target.value }))} />
-                </div>
-                <div className="space-y-1 sm:col-span-2 lg:col-span-2">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Notes (optional)</label>
-                  <Input value={newPurchase.notes} onChange={e => setNewPurchase(p => ({ ...p, notes: e.target.value }))} placeholder="Any extra details" />
-                </div>
-                {purchaseSubTab === "meals" && (
-                  <div className="space-y-1 sm:col-span-2">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase">Meal Type</label>
-                    <select value={newPurchase.mealType} onChange={e => setNewPurchase(p => ({ ...p, mealType: e.target.value }))}
-                      className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
-                      <option value="business_meeting">Business Meeting</option>
-                      <option value="travel_dining">Travel Dining</option>
-                    </select>
-                  </div>
-                )}
-                {purchaseSubTab !== "meals" && (
-                  <div className="space-y-1 sm:col-span-2">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase">Serial Number (optional)</label>
-                    <Input value={newPurchase.serial} onChange={e => setNewPurchase(p => ({ ...p, serial: e.target.value }))} placeholder="e.g. SN123456789" className="font-mono" />
-                  </div>
-                )}
-                <div className="space-y-1 lg:col-span-2">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase">Job</label>
-                  <select value={newPurchase.jobId} onChange={e => setNewPurchase(p => ({ ...p, jobId: e.target.value }))}
-                    className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
-                    <option value="">— Unassigned —</option>
-                    {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
-                  </select>
-                </div>
-                <div className="flex items-center gap-2">
-                  <label className={`flex items-center gap-1.5 px-3 py-2 rounded-lg border cursor-pointer text-sm font-semibold transition-colors ${
-                    newPurchase.isKit ? "bg-indigo-100 text-indigo-700 border-indigo-300" : "bg-white text-slate-500 border-slate-200 hover:border-slate-300"
-                  }`}>
-                    <input type="checkbox" checked={!!newPurchase.isKit} onChange={e => setNewPurchase(p => ({ ...p, isKit: e.target.checked }))} className="w-4 h-4 rounded accent-indigo-600" />
-                    <Layers size={14} />Kit
-                  </label>
-                </div>
-                <Button onClick={addPurchase} className="h-10"><Plus size={16} className="mr-1.5" /> Add</Button>
-              </div>
-            </Card>
-
-            {/* Purchase list */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <h3 className="text-xl font-bold">
-                  {purchaseSubTab === "expendables" ? <><Package size={18} className="inline mr-2 -mt-0.5 text-rose-500" />Expendables</> : purchaseSubTab === "meals" ? <><Utensils size={18} className="inline mr-2 -mt-0.5 text-amber-500" />Meals</> : <><Wrench size={18} className="inline mr-2 -mt-0.5 text-violet-600" />Equipment</>}
-                  <span className="ml-2 text-slate-400 font-normal text-base">— {selectedYear}</span>
-                </h3>
-                <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase px-2">Group by</span>
-                  <button onClick={() => setPurchaseGroupBy("job")}
-                    className={`px-3 py-1 rounded-md text-xs font-semibold transition-all ${purchaseGroupBy === "job" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                    <Briefcase size={12} className="inline mr-1 -mt-0.5" />Job
-                  </button>
-                  <button onClick={() => setPurchaseGroupBy("vendor")}
-                    className={`px-3 py-1 rounded-md text-xs font-semibold transition-all ${purchaseGroupBy === "vendor" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                    <ShoppingCart size={12} className="inline mr-1 -mt-0.5" />Vendor
-                  </button>
-                </div>
-              </div>
-              {(() => {
-                const activeItems = purchaseSubTab === "expendables" ? filteredExpendables : purchaseSubTab === "meals" ? filteredMeals : filteredEquipment;
-                const accentColor = purchaseSubTab === "expendables" ? "text-rose-600" : purchaseSubTab === "meals" ? "text-amber-600" : "text-violet-600";
-
-                const groups = purchaseGroupBy === "vendor"
-                  ? (() => {
-                      const vendorMap = new Map();
-                      activeItems.forEach(p => {
-                        const key = p.vendor?.trim() || "No Vendor";
-                        if (!vendorMap.has(key)) vendorMap.set(key, []);
-                        vendorMap.get(key).push(p);
-                      });
-                      return [...vendorMap.entries()]
-                        .sort((a, b) => a[0].localeCompare(b[0]))
-                        .map(([name, items]) => ({ id: "v_" + name, name, items, isVendor: true }));
-                    })()
-                  : [
-                      ...jobs.map(j => ({ ...j, items: activeItems.filter(p => p.jobId === j.id) })),
-                      { id: "", name: "Unassigned", items: activeItems.filter(p => !p.jobId || !jobs.find(j => j.id === p.jobId)) },
-                    ].filter(g => sq ? g.items.length > 0 : (g.items.length > 0 || g.id !== ""));
-
-                if (groups.every(g => g.items.length === 0)) {
-                  return (
-                    <div className="py-20 text-center bg-white border-2 border-dashed border-slate-200 rounded-2xl">
-                      <div className="bg-slate-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300">
-                        {purchaseSubTab === "expendables" ? <Package size={32} /> : purchaseSubTab === "meals" ? <Utensils size={32} /> : <Wrench size={32} />}
-                      </div>
-                      <h4 className="text-slate-900 font-semibold">{sq ? `No ${purchaseSubTab} match "${sq}"` : `No ${purchaseSubTab} logged for ${selectedYear}`}</h4>
-                      <p className="text-slate-500 text-sm">{sq ? "Try a different search term." : "Use the form above to add your first entry."}</p>
-                    </div>
-                  );
-                }
-
-                const PurchaseCard = ({ p }) => {
-                  const idx = purchases.findIndex(x => x.id === p.id);
-                  const upd = (field, val) => { const n = [...purchases]; n[idx] = { ...n[idx], [field]: val }; setPurchases(n); };
-                  const isLocked = !!p.locked;
-                  return (
-                    <Card key={p.id} id={p.id} className={`transition-all flex flex-col ${isLocked ? "border-amber-200 bg-amber-50/20" : "hover:border-rose-200"} ${highlightedId === p.id ? "ring-2 ring-rose-500 border-rose-400" : ""}`}>
-                      <div className="p-4 space-y-3">
-                        <div className="flex justify-between items-start">
-                          <div className="flex items-center gap-1.5">
-                            <select value={p.category} onChange={e => upd("category", e.target.value)} disabled={isLocked}
-                              className={`text-[10px] font-bold uppercase tracking-wider border rounded px-2 py-0.5 focus:outline-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
-                                p.category === "expendables" ? "bg-rose-100 text-rose-700 border-rose-200" : p.category === "meals" ? "bg-amber-100 text-amber-700 border-amber-200" : "bg-violet-100 text-violet-700 border-violet-200"
-                              }`}>
-                              <option value="expendables">Expendables</option>
-                              <option value="equipment">Equipment</option>
-                              <option value="meals">Meals</option>
-                            </select>
-                            {/* Kit checkbox */}
-                            <label className={`flex items-center gap-1 px-2 py-0.5 rounded border cursor-pointer text-[10px] font-bold uppercase tracking-wider transition-colors ${
-                              p.isKit ? "bg-indigo-100 text-indigo-700 border-indigo-200" : "bg-slate-100 text-slate-500 border-slate-200 hover:border-slate-300"
-                            } ${isLocked ? "opacity-50 cursor-not-allowed pointer-events-none" : ""}`}>
-                              <input type="checkbox" checked={!!p.isKit} disabled={isLocked}
-                                onChange={e => upd("isKit", e.target.checked)}
-                                className="w-3 h-3 rounded accent-indigo-600 cursor-pointer" />
-                              Kit
-                            </label>
-                          </div>
-                          <div className="flex items-center gap-1">
-                            <button
-                              onClick={() => upd("locked", !p.locked)}
-                              className={`p-1.5 rounded-lg transition-colors ${isLocked ? "text-amber-600 bg-amber-100 hover:bg-amber-200" : "text-slate-300 hover:text-slate-500 hover:bg-slate-100"}`}
-                              title={isLocked ? "Unlock entry to edit" : "Lock entry to prevent edits"}>
-                              {isLocked ? <Lock size={13} /> : <LockOpen size={13} />}
-                            </button>
-                            <select value={p.jobId || ""} onChange={e => upd("jobId", e.target.value)} disabled={isLocked}
-                              className="text-[10px] border border-slate-200 rounded px-1.5 py-0.5 bg-white text-slate-500 focus:outline-none max-w-[90px] disabled:opacity-50 disabled:cursor-not-allowed" title="Move to job">
-                              <option value="">Unassigned</option>
-                              {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
-                            </select>
-                            <Button variant="danger" onClick={() => deletePurchase(p.id)} className="!p-1.5"><Trash2 size={13} /></Button>
-                          </div>
-                        </div>
-                        <div className="space-y-1">
-                          <label className="text-[10px] font-bold text-slate-400 uppercase">Item Name</label>
-                          <Input value={p.name} placeholder="Item name" disabled={isLocked} onChange={e => upd("name", e.target.value)} />
-                        </div>
-                        <div className="space-y-1">
-                          <label className="text-[10px] font-bold text-slate-400 uppercase">Vendor</label>
-                          <Input value={p.vendor || ""} placeholder="Vendor / store" disabled={isLocked} onChange={e => upd("vendor", e.target.value)} />
-                        </div>
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="space-y-1">
-                            <label className="text-[10px] font-bold text-slate-400 uppercase">Amount ($)</label>
-                            <Input type="number" value={p.amount} disabled={isLocked} onChange={e => upd("amount", e.target.value)} />
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-[10px] font-bold text-slate-400 uppercase">Date</label>
-                            <Input type="date" value={p.date} disabled={isLocked} onChange={e => upd("date", e.target.value)} />
-                          </div>
-                        </div>
-                        <div className="space-y-1">
-                          <label className="text-[10px] font-bold text-slate-400 uppercase">Notes</label>
-                          <Input value={p.notes || ""} placeholder="Optional notes" disabled={isLocked} onChange={e => upd("notes", e.target.value)} />
-                        </div>
-                        {p.category === "meals" ? (
-                          <div className="space-y-1">
-                            <label className="text-[10px] font-bold text-slate-400 uppercase">Meal Type</label>
-                            <select value={p.mealType || "business_meeting"} disabled={isLocked} onChange={e => upd("mealType", e.target.value)}
-                              className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
-                              <option value="business_meeting">Business Meeting</option>
-                              <option value="travel_dining">Travel Dining</option>
-                            </select>
-                          </div>
-                        ) : (
-                          <>
-                          <div className="space-y-1">
-                            <label className="text-[10px] font-bold text-slate-400 uppercase">Serial Number</label>
-                            <Input value={p.serial || ""} placeholder="e.g. SN123456789" disabled={isLocked} onChange={e => upd("serial", e.target.value)} className="font-mono" />
-                          </div>
-                          {p.category === "equipment" && (
-                            <div className="space-y-2 pt-2 border-t border-slate-100">
-                              <div className="space-y-1">
-                                <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><Calculator size={10} />Depreciation Method</label>
-                                <select value={p.depreciationMethod || "section179"} disabled={isLocked} onChange={e => upd("depreciationMethod", e.target.value)}
-                                  className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
-                                  <option value="section179">Section 179 — Full deduction year 1</option>
-                                  <option value="bonus">Bonus Depreciation — 100% year 1</option>
-                                  <option value="straight-line">Straight-Line — Spread over useful life</option>
-                                  <option value="macrs">MACRS — IRS half-year tables</option>
-                                </select>
-                              </div>
-                              {(p.depreciationMethod === "straight-line") && (
-                                <div className="space-y-1">
-                                  <label className="text-[10px] font-bold text-slate-400 uppercase">Useful Life (years)</label>
-                                  <select value={p.usefulLife || "5"} disabled={isLocked} onChange={e => upd("usefulLife", e.target.value)}
-                                    className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
-                                    <option value="3">3 years</option>
-                                    <option value="5">5 years</option>
-                                    <option value="7">7 years</option>
-                                    <option value="10">10 years</option>
-                                    <option value="15">15 years</option>
-                                  </select>
-                                </div>
-                              )}
-                              {(p.depreciationMethod === "macrs") && (
-                                <div className="space-y-1">
-                                  <label className="text-[10px] font-bold text-slate-400 uppercase">MACRS Asset Class</label>
-                                  <select value={p.macrsClass || "5yr"} disabled={isLocked} onChange={e => upd("macrsClass", e.target.value)}
-                                    className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
-                                    <option value="3yr">3-year (small tools, tractors)</option>
-                                    <option value="5yr">5-year (cameras, computers, cars)</option>
-                                    <option value="7yr">7-year (office furniture, equipment)</option>
-                                    <option value="10yr">10-year (certain manufacturing equip)</option>
-                                    <option value="15yr">15-year (land improvements)</option>
-                                  </select>
-                                </div>
-                              )}
-                              {(p.depreciationMethod === "straight-line" || p.depreciationMethod === "macrs") && p.date && parseFloat(p.amount) > 0 && (
-                                <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
-                                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Depreciation Schedule</p>
-                                  {(() => {
-                                    const cost = parseFloat(p.amount) || 0;
-                                    const purchaseYear = parseInt(p.date.slice(0, 4), 10);
-                                    const thisYear = new Date().getFullYear();
-                                    const rows = p.depreciationMethod === "macrs"
-                                      ? (MACRS_TABLES[p.macrsClass || "5yr"] || MACRS_TABLES["5yr"]).map((pct, i) => ({ year: purchaseYear + i, amount: cost * pct / 100 }))
-                                      : Array.from({ length: parseInt(p.usefulLife || 5) }, (_, i) => ({ year: purchaseYear + i, amount: cost / parseInt(p.usefulLife || 5) }));
-                                    return rows.map(({ year, amount }) => (
-                                      <div key={year} className={`flex justify-between text-xs py-0.5 ${year === thisYear ? "font-bold" : ""}`}>
-                                        <span className={year === thisYear ? "text-blue-600" : "text-slate-400"}>{year}{year === thisYear ? " ← current" : ""}</span>
-                                        <span className={year === thisYear ? "text-emerald-600 font-mono" : "text-slate-500 font-mono"}>${amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                                      </div>
-                                    ));
-                                  })()}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                          </>
-                        )}
-                        {/* Kit rental rates — shown only when isKit is checked */}
-                        {p.isKit && (
-                          <div className="pt-2 border-t border-indigo-100 space-y-2">
-                            <p className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider flex items-center gap-1.5">
-                              <Layers size={10} />Kit Rental Rates
-                            </p>
-                            <div className="grid grid-cols-2 gap-3">
-                              <div className="space-y-1">
-                                <label className="text-[10px] font-bold text-slate-400 uppercase">Daily Rate ($)</label>
-                                <Input type="number" value={p.kitDailyRate || ""} placeholder="0.00" disabled={isLocked} onChange={e => upd("kitDailyRate", e.target.value)} />
-                              </div>
-                              <div className="space-y-1">
-                                <label className="text-[10px] font-bold text-slate-400 uppercase">Weekly Rate ($)</label>
-                                <Input type="number" value={p.kitWeeklyRate || ""} placeholder="0.00" disabled={isLocked} onChange={e => upd("kitWeeklyRate", e.target.value)} />
-                              </div>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                      <div className="p-3 bg-slate-50 border-t border-slate-100 flex gap-2">
-                        {!p.receipt ? (
-                          <div className="relative flex-1">
-                            <input type="file" accept="image/*,.pdf" className="absolute inset-0 opacity-0 w-full h-full cursor-pointer"
-                              onChange={e => { if (e.target.files[0]) handleReceiptUpload(p.id, e.target.files[0]); e.target.value = ""; }} />
-                            <Button variant="outline" className="w-full text-slate-500 border-slate-200">
-                              <UploadCloud size={14} className="mr-1.5" />Attach Receipt
-                            </Button>
-                          </div>
-                        ) : (
-                          <>
-                            <Button variant="outline" className="flex-1 text-emerald-600 border-emerald-200 hover:bg-emerald-50"
-                              onClick={() => setPreviewItem({ id: "receipt_" + p.id, fileName: p.receipt.fileName, fileId: p.receipt.fileId, fileType: p.receipt.fileType })}>
-                              <Eye size={14} className="mr-1.5" />View Receipt
-                            </Button>
-                            <Button variant="danger" onClick={() => { setPurchases(prev => prev.map(x => x.id === p.id ? { ...x, receipt: undefined } : x)); URL.revokeObjectURL(blobCache.current.get("receipt_" + p.id)?.url); blobCache.current.delete("receipt_" + p.id); }} className="!px-2" title="Remove receipt">
-                              <X size={14} />
-                            </Button>
-                          </>
-                        )}
-                      </div>
-                    </Card>
-                  );
-                };
-
-                return groups.map(group => {
-                  if (group.items.length === 0) return null;
-                  const isVendorGroup = !!group.isVendor;
-                  const isExpanded = sq || isVendorGroup || group.id === "" ? true : expandedJobs.has("pur_" + group.id);
-                  const groupTotal = group.items.reduce((a, b) => a + (parseFloat(b.amount) || 0), 0);
-                  const GroupIcon = isVendorGroup ? ShoppingCart : Briefcase;
-                  return (
-                    <div key={group.id || "unassigned"} className="border border-slate-200 rounded-xl overflow-hidden bg-white">
-                      <div className="flex items-center justify-between px-4 py-3 bg-slate-50 border-b border-slate-200 cursor-pointer select-none"
-                        onClick={() => !isVendorGroup && group.id && toggleJobExpanded("pur_" + group.id)}>
-                        <div className="flex items-center gap-2">
-                          {!isVendorGroup && group.id ? (
-                            isExpanded ? <ChevronDown size={16} className="text-slate-400" /> : <ChevronRight size={16} className="text-slate-400" />
-                          ) : <span className="w-4" />}
-                          <GroupIcon size={15} className="text-slate-400" />
-                          <span className="font-semibold text-slate-800 text-sm">{group.name}</span>
-                          <span className="text-xs text-slate-400">({group.items.length} item{group.items.length !== 1 ? "s" : ""})</span>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <span className={`text-xs font-bold ${accentColor}`}>${groupTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                          {!isVendorGroup && group.id && <Button variant="danger" onClick={e => { e.stopPropagation(); deleteJob(group.id); }} className="!p-1 ml-1" title="Delete job"><Trash2 size={13} /></Button>}
-                        </div>
-                      </div>
-                      {isExpanded && (
-                        <div className="p-4">
-                          {group.items.length === 0 ? (
-                            <p className="text-sm text-slate-400 text-center py-6">No {purchaseSubTab === "meals" ? "meal entries" : purchaseSubTab} in this job yet. Select it in the form above.</p>
-                          ) : (
-                            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-                              {group.items.map(p => <PurchaseCard key={p.id} p={p} />)}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                });
-              })()}
-            </div>
-          </>
+          <PurchasesTab
+            purchases={purchases}
+            setPurchases={setPurchases}
+            newPurchase={newPurchase}
+            setNewPurchase={setNewPurchase}
+            purchaseSubTab={purchaseSubTab}
+            setPurchaseSubTab={setPurchaseSubTab}
+            purchaseGroupBy={purchaseGroupBy}
+            setPurchaseGroupBy={setPurchaseGroupBy}
+            filteredPurchases={filteredPurchases}
+            filteredExpendables={filteredExpendables}
+            filteredMeals={filteredMeals}
+            filteredEquipment={filteredEquipment}
+            totalPurchases={totalPurchases}
+            totalExpendables={totalExpendables}
+            totalEquipment={totalEquipment}
+            jobs={jobs}
+            selectedYear={selectedYear}
+            expandedJobs={expandedJobs}
+            toggleJobExpanded={toggleJobExpanded}
+            highlightedId={highlightedId}
+            sq={sq}
+            blobCache={blobCache}
+            addPurchase={addPurchase}
+            deletePurchase={deletePurchase}
+            deleteJob={deleteJob}
+            handleReceiptUpload={handleReceiptUpload}
+            generateExpenseReport={generateExpenseReport}
+            setPreviewItem={setPreviewItem}
+          />
         )}
 
-        {activeTab === "kit" && (() => {
-          const kitItems = purchases.filter(p => p.isKit);
-          const updKitItem = (id, field, val) => {
-            setPurchases(prev => prev.map(p => p.id === id ? { ...p, [field]: val } : p));
-          };
-          const deletePackage = (pkgId) => setKitPackages(prev => prev.filter(x => x.id !== pkgId));
-          const updPackage = (pkgId, field, val) => setKitPackages(prev => prev.map(p => p.id === pkgId ? { ...p, [field]: val } : p));
-          const removeItemFromPackage = (pkgId, itemId) => {
-            setKitPackages(prev => prev.map(pkg =>
-              pkg.id !== pkgId ? pkg : { ...pkg, itemIds: (pkg.itemIds || []).filter(x => x !== itemId) }
-            ));
-          };
-          const addItemToPackage = (pkgId, itemId) => {
-            if (!itemId) return;
-            setKitPackages(prev => prev.map(pkg =>
-              pkg.id !== pkgId ? pkg : { ...pkg, itemIds: [...new Set([...(pkg.itemIds || []), itemId])] }
-            ));
-          };
-          const addPackage = () => {
-            if (!newPackage.name.trim()) return;
-            setKitPackages(prev => [...prev, {
-              id: crypto.randomUUID(),
-              name: newPackage.name.trim(),
-              dailyRate: newPackage.dailyRate,
-              weeklyRate: newPackage.weeklyRate,
-              notes: newPackage.notes,
-              barcode: newPackage.barcode,
-              itemIds: [],
-              locked: true,
-              timestamp: Date.now(),
-            }]);
-            setNewPackage({ name: "", dailyRate: "", weeklyRate: "", notes: "", barcode: "", itemIds: [] });
-          };
-          const totalKitDailyRate = kitItems.reduce((a, p) => a + (parseFloat(p.kitDailyRate) || 0), 0);
-          const totalKitWeeklyRate = kitItems.reduce((a, p) => a + (parseFloat(p.kitWeeklyRate) || 0), 0);
+        {activeTab === "kit" && (
+          <KitTab
+            purchases={purchases}
+            setPurchases={setPurchases}
+            kitPackages={kitPackages}
+            setKitPackages={setKitPackages}
+            kitSubTab={kitSubTab}
+            setKitSubTab={setKitSubTab}
+            newPackage={newPackage}
+            setNewPackage={setNewPackage}
+          />
+        )}
 
-          return (
-            <>
-              {/* Stats */}
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                <Card className="p-6 bg-indigo-50 border-indigo-200">
-                  <p className="text-indigo-700 text-sm font-medium">Kit Items</p>
-                  <h2 className="text-3xl font-bold mt-1 text-indigo-700">{kitItems.length}</h2>
-                </Card>
-                <Card className="p-6 bg-indigo-50 border-indigo-200">
-                  <p className="text-indigo-700 text-sm font-medium">Total Daily Rate</p>
-                  <h2 className="text-3xl font-bold mt-1 text-indigo-700">${totalKitDailyRate.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-                </Card>
-                <Card className="p-6 bg-indigo-50 border-indigo-200">
-                  <p className="text-indigo-700 text-sm font-medium">Total Weekly Rate</p>
-                  <h2 className="text-3xl font-bold mt-1 text-indigo-700">${totalKitWeeklyRate.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-                </Card>
-              </div>
-
-              {/* Sub-tabs */}
-              <div className="flex gap-1 bg-slate-100 p-1 rounded-xl w-fit">
-                <button onClick={() => setKitSubTab("items")} className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-all ${kitSubTab === "items" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                  <Layers size={13} className="inline mr-1.5 -mt-0.5" />Kit Items
-                </button>
-                <button onClick={() => setKitSubTab("packages")} className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-all ${kitSubTab === "packages" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                  <Package size={13} className="inline mr-1.5 -mt-0.5" />Packages ({kitPackages.length})
-                </button>
-              </div>
-
-              {/* Kit Items sub-tab */}
-              {kitSubTab === "items" && (
-                <>
-                  {kitItems.length === 0 ? (
-                    <div className="py-20 text-center bg-white border-2 border-dashed border-slate-200 rounded-2xl">
-                      <div className="bg-slate-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300"><Layers size={32} /></div>
-                      <h4 className="text-slate-900 font-semibold">No kit items yet</h4>
-                      <p className="text-slate-500 text-sm mt-1">Check the "Kit" box on a purchase entry to add it here.</p>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {kitItems.map(p => {
-                        const kitLocked = !!p.locked;
-                        return (
-                        <Card key={p.id} className={`space-y-3 transition-all ${kitLocked ? "border-amber-200 bg-amber-50/20" : ""}`}>
-                          <div className="p-4 space-y-3">
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0">
-                              <p className="font-semibold text-slate-800 truncate">{p.name || <span className="text-slate-400 italic">Unnamed item</span>}</p>
-                              {p.vendor && <p className="text-xs text-slate-500 truncate">{p.vendor}</p>}
-                              {p.serial && <p className="text-[10px] text-slate-400 font-mono truncate">SN: {p.serial}</p>}
-                            </div>
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <span className={`text-[10px] font-bold uppercase tracking-wider border rounded px-2 py-0.5 ${
-                                p.category === "expendables" ? "bg-rose-100 text-rose-700 border-rose-200" : "bg-violet-100 text-violet-700 border-violet-200"
-                              }`}>{p.category}</span>
-                              <button
-                                onClick={() => updKitItem(p.id, "locked", !p.locked)}
-                                className={`p-1.5 rounded-lg transition-colors ${kitLocked ? "text-amber-600 bg-amber-100 hover:bg-amber-200" : "text-slate-300 hover:text-slate-500 hover:bg-slate-100"}`}
-                                title={kitLocked ? "Unlock to edit" : "Lock entry"}>
-                                {kitLocked ? <Lock size={13} /> : <LockOpen size={13} />}
-                              </button>
-                            </div>
-                          </div>
-                          <div className="pt-2 border-t border-indigo-100 space-y-2">
-                            <p className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider flex items-center gap-1.5"><Layers size={10} />Kit Rental Rates</p>
-                            <div className="grid grid-cols-2 gap-3">
-                              <div className="space-y-1">
-                                <label className="text-[10px] font-bold text-slate-400 uppercase">Daily ($)</label>
-                                <Input type="number" value={p.kitDailyRate || ""} placeholder="0.00" disabled={kitLocked} onChange={e => updKitItem(p.id, "kitDailyRate", e.target.value)} />
-                              </div>
-                              <div className="space-y-1">
-                                <label className="text-[10px] font-bold text-slate-400 uppercase">Weekly ($)</label>
-                                <Input type="number" value={p.kitWeeklyRate || ""} placeholder="0.00" disabled={kitLocked} onChange={e => updKitItem(p.id, "kitWeeklyRate", e.target.value)} />
-                              </div>
-                            </div>
-                            <div className="space-y-1">
-                              <label className="text-[10px] font-bold text-slate-400 uppercase">Barcode</label>
-                              <Input value={p.barcode || ""} placeholder="Scan or enter barcode" disabled={kitLocked} onChange={e => updKitItem(p.id, "barcode", e.target.value)} className="font-mono" />
-                            </div>
-                          </div>
-                          </div>
-                        </Card>
-                        );
-                      })}
-                    </div>
-                  )}
-                </>
-              )}
-
-              {/* Packages sub-tab */}
-              {kitSubTab === "packages" && (
-                <>
-                  {/* New package form */}
-                  <Card className="p-5 space-y-4 border-indigo-200 bg-indigo-50/30">
-                    <h3 className="font-semibold text-slate-800 flex items-center gap-2"><Package size={16} className="text-indigo-500" />New Package</h3>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase">Package Name</label>
-                        <Input value={newPackage.name} placeholder="e.g. Camera Package A" onChange={e => setNewPackage(p => ({ ...p, name: e.target.value }))} />
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase">Daily Rate ($)</label>
-                        <Input type="number" value={newPackage.dailyRate} placeholder="0.00" onChange={e => setNewPackage(p => ({ ...p, dailyRate: e.target.value }))} />
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase">Weekly Rate ($)</label>
-                        <Input type="number" value={newPackage.weeklyRate} placeholder="0.00" onChange={e => setNewPackage(p => ({ ...p, weeklyRate: e.target.value }))} />
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase">Barcode</label>
-                        <Input value={newPackage.barcode} placeholder="Scan or enter barcode" onChange={e => setNewPackage(p => ({ ...p, barcode: e.target.value }))} className="font-mono" />
-                      </div>
-                    </div>
-                    <Button onClick={addPackage} disabled={!newPackage.name.trim()}><Plus size={15} className="mr-1.5" />Create Package</Button>
-                  </Card>
-
-                  {/* Existing packages as windows */}
-                  {kitPackages.length === 0 ? (
-                    <div className="py-16 text-center bg-white border-2 border-dashed border-slate-200 rounded-2xl">
-                      <div className="bg-slate-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300"><Package size={32} /></div>
-                      <h4 className="text-slate-900 font-semibold">No packages yet</h4>
-                      <p className="text-slate-500 text-sm mt-1">Use the form above to create your first package.</p>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {kitPackages.map(pkg => {
-                        const pkgItems = kitItems.filter(p => (pkg.itemIds || []).includes(p.id));
-                        const availableToAdd = kitItems.filter(p => !(pkg.itemIds || []).includes(p.id));
-                        const pkgLocked = !!pkg.locked;
-                        return (
-                          <Card key={pkg.id} className={`flex flex-col overflow-hidden transition-all ${pkgLocked ? "border-amber-200" : "border-indigo-200"}`}>
-                            {/* Window title bar */}
-                            <div className={`flex items-center justify-between px-4 py-3 text-white ${pkgLocked ? "bg-amber-500" : "bg-indigo-600"}`}>
-                              <div className="flex items-center gap-2 min-w-0">
-                                <Package size={14} className="shrink-0" />
-                                <input
-                                  value={pkg.name}
-                                  disabled={pkgLocked}
-                                  onChange={e => updPackage(pkg.id, "name", e.target.value)}
-                                  className="bg-transparent font-semibold text-sm truncate border-b border-transparent hover:border-white/50 focus:border-white focus:outline-none w-full disabled:cursor-not-allowed"
-                                />
-                              </div>
-                              <div className="flex items-center gap-1.5 shrink-0 ml-2">
-                                <button
-                                  onClick={() => updPackage(pkg.id, "locked", !pkg.locked)}
-                                  className="text-white/70 hover:text-white transition-colors"
-                                  title={pkgLocked ? "Unlock to edit" : "Lock package"}>
-                                  {pkgLocked ? <Lock size={14} /> : <LockOpen size={14} />}
-                                </button>
-                                <button onClick={() => deletePackage(pkg.id)} className="text-white/70 hover:text-white transition-colors" title="Delete package">
-                                  <X size={15} />
-                                </button>
-                              </div>
-                            </div>
-
-                            {/* Window body */}
-                            <div className={`p-4 space-y-4 flex-1 ${pkgLocked ? "bg-amber-50/20" : ""}`}>
-                              {/* Rates */}
-                              <div className="grid grid-cols-2 gap-3">
-                                <div className="space-y-1">
-                                  <label className="text-[10px] font-bold text-slate-400 uppercase">Daily Rate ($)</label>
-                                  <Input type="number" value={pkg.dailyRate} placeholder="0.00" disabled={pkgLocked} onChange={e => updPackage(pkg.id, "dailyRate", e.target.value)} />
-                                </div>
-                                <div className="space-y-1">
-                                  <label className="text-[10px] font-bold text-slate-400 uppercase">Weekly Rate ($)</label>
-                                  <Input type="number" value={pkg.weeklyRate} placeholder="0.00" disabled={pkgLocked} onChange={e => updPackage(pkg.id, "weeklyRate", e.target.value)} />
-                                </div>
-                              </div>
-                              <div className="space-y-1">
-                                <label className="text-[10px] font-bold text-slate-400 uppercase">Barcode</label>
-                                <Input value={pkg.barcode || ""} placeholder="Scan or enter barcode" disabled={pkgLocked} onChange={e => updPackage(pkg.id, "barcode", e.target.value)} className="font-mono" />
-                              </div>
-
-                              {/* Items in this package */}
-                              {pkgItems.length > 0 && (
-                                <div className="space-y-1.5">
-                                  <p className="text-[10px] font-bold text-slate-400 uppercase">Items ({pkgItems.length})</p>
-                                  {pkgItems.map(item => (
-                                    <div key={item.id} className="flex items-center justify-between gap-2 px-3 py-1.5 bg-indigo-50 border border-indigo-100 rounded-lg">
-                                      <span className="text-sm text-slate-700 truncate">{item.name || "Unnamed"}</span>
-                                      {!pkgLocked && <button onClick={() => removeItemFromPackage(pkg.id, item.id)} className="shrink-0 text-slate-300 hover:text-rose-500 transition-colors" title="Remove from package">
-                                        <X size={13} />
-                                      </button>}
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-
-                              {/* Add item dropdown */}
-                              {!pkgLocked && availableToAdd.length > 0 && (
-                                <div className="space-y-1">
-                                  <label className="text-[10px] font-bold text-slate-400 uppercase">Add Item from Kit</label>
-                                  <select
-                                    defaultValue=""
-                                    onChange={e => { addItemToPackage(pkg.id, e.target.value); e.target.value = ""; }}
-                                    className="flex w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400">
-                                    <option value="" disabled>— select a kit item —</option>
-                                    {availableToAdd.map(item => (
-                                      <option key={item.id} value={item.id}>{item.name || "Unnamed"}</option>
-                                    ))}
-                                  </select>
-                                </div>
-                              )}
-                              {availableToAdd.length === 0 && kitItems.length > 0 && (
-                                <p className="text-[10px] text-slate-400 italic">All kit items are in this package.</p>
-                              )}
-                              {kitItems.length === 0 && (
-                                <p className="text-[10px] text-slate-400 italic">No kit items yet. Mark a purchase as Kit to add items here.</p>
-                              )}
-                            </div>
-                          </Card>
-                        );
-                      })}
-                    </div>
-                  )}
-                </>
-              )}
-            </>
-          );
-        })()}
 
         {/* ── PRODUCTION CALENDAR ── */}
-        {activeTab === "calendar" && (() => {
-          const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
-          const today = new Date().toISOString().split("T")[0];
-
-          // Build event map from timecards + invoices
-          const eventMap = {};
-          const addEv = (date, ev) => { if (!date) return; if (!eventMap[date]) eventMap[date] = []; eventMap[date].push(ev); };
-
-          timecards.forEach(tc => {
-            (tc.days || []).forEach(d => {
-              const type = d.type || "work";
-              const hasWork = !!(d.call || d.totalHours > 0);
-              if (type === "hold") {
-                addEv(d.date, { kind: "hold", label: tc.company || "Hold Day", tc });
-              } else if (type === "travel") {
-                addEv(d.date, { kind: "travel", label: (tc.company || "Travel") + " · Travel", tc });
-              } else if (type === "work" && hasWork) {
-                addEv(d.date, { kind: "shoot", label: tc.company || "Shoot Day", hours: d.totalHours, tc });
-              }
-            });
-          });
-
-          // Standalone hold days
-          holdDays.forEach(hd => {
-            const released = new Set(hd.releasedDates || []);
-            const dates = hd.dates || [];
-            if (hd.startDate && !hd.dates) {
-              const start = new Date(hd.startDate + "T12:00");
-              const end = hd.endDate ? new Date(hd.endDate + "T12:00") : start;
-              for (let dt = new Date(start); dt <= end; dt.setDate(dt.getDate() + 1)) {
-                const iso = dt.toISOString().split("T")[0];
-                if (!released.has(iso)) addEv(iso, { kind: "hold", holdType: hd.type || "hold", label: hd.company || "Hold Day", holdId: hd.id, holdDate: iso });
-              }
-            } else {
-              dates.forEach(iso => {
-                if (!released.has(iso)) addEv(iso, { kind: "hold", holdType: hd.type || "hold", label: hd.company || "Hold Day", holdId: hd.id, holdDate: iso });
-              });
-            }
-          });
-
-          invoices.forEach(inv => {
-            if (inv.dueDate) {
-              const s = computeInvoiceStatus(inv);
-              const isPaid = s === "Paid";
-              const isOverdue = !isPaid && inv.dueDate < today;
-              addEv(inv.dueDate, { kind: isPaid ? "inv-paid" : isOverdue ? "inv-overdue" : "inv-due", label: `${inv.company || "Invoice"} — Due`, amount: inv.amount, inv });
-            }
-          });
-
-          // Build grid for calYear / calMonth
-          const firstDow = new Date(calYear, calMonth, 1).getDay();
-          const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
-          const cells = [];
-          for (let i = 0; i < firstDow; i++) cells.push(null);
-          for (let d = 1; d <= daysInMonth; d++) {
-            const iso = `${calYear}-${String(calMonth + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-            cells.push({ d, iso, evs: eventMap[iso] || [] });
-          }
-          while (cells.length % 7 !== 0) cells.push(null);
-
-          const prevMonth = () => { const dt = new Date(calYear, calMonth - 1, 1); setCalMonth(dt.getMonth()); setCalYear(dt.getFullYear()); };
-          const nextMonth = () => { const dt = new Date(calYear, calMonth + 1, 1); setCalMonth(dt.getMonth()); setCalYear(dt.getFullYear()); };
-          const selSet = new Set(calSelectedDates);
-          const toggleDate = iso => setCalSelectedDates(prev => prev.includes(iso) ? prev.filter(d => d !== iso) : [...prev, iso]);
-
-          const kindStyle = { shoot: "bg-blue-100 text-blue-800", hold: "bg-amber-100 text-amber-800", travel: "bg-purple-100 text-purple-800", "inv-due": "bg-orange-100 text-orange-800", "inv-overdue": "bg-red-100 text-red-800", "inv-paid": "bg-emerald-100 text-emerald-700" };
-          const kindDot = { shoot: "🎬", hold: "⏸", travel: "✈", "inv-due": "💰", "inv-overdue": "⚠", "inv-paid": "✓" };
-          const holdTypeStyle = { soft: "bg-pink-100 text-pink-700", hold: "bg-blue-100 text-blue-800", locked: "bg-orange-100 text-orange-800", travel: "bg-purple-100 text-purple-800", prep: "bg-teal-100 text-teal-800", scout: "bg-cyan-100 text-cyan-800", wrap: "bg-slate-100 text-slate-700" };
-          const holdTypeDot = { soft: "✏️", hold: "⏸", locked: "🔒", travel: "✈️", prep: "🔧", scout: "🚧", wrap: "📦" };
-          const holdTypeLabel = { soft: "Soft Hold", hold: "Hold", locked: "Locked", travel: "Travel", prep: "Prep", scout: "Scout", wrap: "Wrap" };
-          const getChipStyle = ev => ev.holdType ? (holdTypeStyle[ev.holdType] || kindStyle.hold) : kindStyle[ev.kind];
-          const getChipDot = ev => ev.holdType ? (holdTypeDot[ev.holdType] || kindDot.hold) : kindDot[ev.kind];
-
-          return (
-            <div className="space-y-4">
-              {/* Navigation */}
-              <div className="flex items-center justify-between bg-white border border-slate-200 rounded-xl px-5 py-3 shadow-sm">
-                <button onClick={prevMonth} className="p-2 rounded-lg hover:bg-slate-100 transition-colors text-slate-600"><ChevronLeft size={18} /></button>
-                <div className="text-center">
-                  <h2 className="text-xl font-bold text-slate-800">{MONTH_NAMES[calMonth]} {calYear}</h2>
-                  <button onClick={() => { setCalMonth(new Date().getMonth()); setCalYear(new Date().getFullYear()); }} className="text-[10px] text-blue-500 hover:underline mt-0.5">Today</button>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => { setCalSelectMode(m => !m); setCalSelectedDates([]); }}
-                    className={`flex items-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-colors shadow-sm ${calSelectMode ? "bg-amber-500 text-white ring-2 ring-amber-300" : "bg-amber-400 text-white hover:bg-amber-500"}`}
-                  >
-                    <span className="text-base leading-none">⏸</span> {calSelectMode ? "Selecting…" : "Add hold and travel days"}
-                  </button>
-                  <button onClick={nextMonth} className="p-2 rounded-lg hover:bg-slate-100 transition-colors text-slate-600"><ChevronRight size={18} /></button>
-                </div>
-              </div>
-
-              {/* Select-mode action bar */}
-              {calSelectMode && (
-                <div className="flex items-center justify-between bg-amber-50 border border-amber-300 rounded-xl px-4 py-3 shadow-sm">
-                  <p className="text-sm text-amber-800">
-                    {calSelectedDates.length === 0
-                      ? <span className="font-medium">Tap days on the calendar to select them for a hold</span>
-                      : <span className="font-bold">{calSelectedDates.length} day{calSelectedDates.length !== 1 ? "s" : ""} selected</span>}
-                  </p>
-                  <div className="flex items-center gap-2">
-                    {calSelectedDates.length > 0 && (
-                      <button
-                        onClick={() => { setHoldNameInput(""); setHoldTypeInput("hold"); setHoldNamePrompt(true); }}
-                        className="px-3 py-1.5 text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition-colors"
-                      >Apply Hold</button>
-                    )}
-                    <button
-                      onClick={() => { setCalSelectMode(false); setCalSelectedDates([]); }}
-                      className="px-3 py-1.5 text-xs font-semibold border border-amber-300 text-amber-700 hover:bg-amber-100 rounded-lg transition-colors"
-                    >Cancel</button>
-                  </div>
-                </div>
-              )}
-
-              {/* Two-column layout: calendar left, journal right */}
-              <div className="flex gap-4 items-start">
-                {/* Left: DOW headers + grid */}
-                <div className="flex-1 min-w-0 space-y-2">
-                  {/* Day-of-week headers */}
-                  <div className="grid grid-cols-7 gap-1 px-0.5">
-                    {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(dn => (
-                      <div key={dn} className="text-center text-[10px] font-bold text-slate-400 uppercase tracking-wider py-1">{dn}</div>
-                    ))}
-                  </div>
-
-                  {/* Calendar grid */}
-                  <div className="grid grid-cols-7 gap-1">
-                    {cells.map((cell, ci) => {
-                      const isSelected = cell && selSet.has(cell.iso);
-                      const notePreview = cell && calendarNotes[cell.iso]
-                        ? calendarNotes[cell.iso].split("\n").filter(l => l.trim()).slice(0, 2)
-                        : null;
-                      return (
-                        <div
-                          key={ci}
-                          onClick={() => {
-                            if (!cell) return;
-                            if (calSelectMode) { toggleDate(cell.iso); return; }
-                            if (calNoteDate === cell.iso) { setCalNoteDate(null); setCalNoteEditing(false); return; }
-                            const existing = calendarNotes[cell.iso] || "";
-                            setCalNoteDate(cell.iso);
-                            setCalNoteEditing(!existing);
-                            setCalNoteDraft(existing);
-                          }}
-                          className={`min-h-[88px] rounded-xl border p-1.5 flex flex-col transition-colors ${
-                            cell === null ? "bg-transparent border-transparent" :
-                            isSelected ? "border-amber-500 bg-amber-50 ring-2 ring-amber-400 cursor-pointer" :
-                            calSelectMode ? "border-slate-200 bg-white hover:bg-amber-50 hover:border-amber-300 cursor-pointer" :
-                            calNoteDate === cell.iso ? "border-blue-500 bg-blue-50 ring-2 ring-blue-300 cursor-pointer" :
-                            cell.iso === today ? "border-blue-400 bg-blue-50 shadow-sm cursor-pointer" :
-                            "border-slate-200 bg-white hover:border-blue-200 cursor-pointer"
-                          }`}
-                        >
-                          {cell && (
-                            <>
-                              <div className="flex items-start justify-between mb-1">
-                                <div className={`text-xs font-bold w-6 h-6 flex items-center justify-center rounded-full shrink-0 ${
-                                  isSelected ? "bg-amber-500 text-white" :
-                                  cell.iso === today ? "bg-blue-600 text-white" : "text-slate-600"
-                                }`}>{cell.d}</div>
-                                {calendarNotes[cell.iso] && <div className="w-1.5 h-1.5 rounded-full bg-blue-400 mt-1 shrink-0" title="Has note" />}
-                              </div>
-                              <div className="space-y-0.5 flex-1">
-                                {cell.evs.slice(0, 3).map((ev, ei) => (
-                                  <div key={ei} className={`text-[9px] px-1 py-0.5 rounded truncate font-medium leading-tight flex items-center gap-0.5 ${getChipStyle(ev)}`} title={ev.label + (ev.hours ? ` (${ev.hours}h)` : "") + (ev.amount ? ` · $${(parseFloat(ev.amount)||0).toLocaleString()}` : "")}>
-                                    <span className="truncate flex-1">{getChipDot(ev)} {ev.label}</span>
-                                    {ev.holdId && !calSelectMode && <button onClick={e => { e.stopPropagation(); setHoldReleaseModal({ holdId: ev.holdId, date: cell.iso }); }} className="shrink-0 opacity-60 hover:opacity-100 ml-0.5 leading-none" title="Release options">&times;</button>}
-                                  </div>
-                                ))}
-                                {cell.evs.length > 3 && <div className="text-[9px] text-slate-400 font-medium pl-1">+{cell.evs.length - 3} more</div>}
-                              </div>
-                              {notePreview && (
-                                <div className="mt-1 pt-1 border-t border-blue-100 space-y-0.5">
-                                  {notePreview.map((line, i) => (
-                                    <p key={i} className="text-[8px] text-blue-500 truncate leading-snug">📝 {line}</p>
-                                  ))}
-                                </div>
-                              )}
-                            </>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Right: Journal panel */}
-                {calNoteDate && !calSelectMode && (() => {
-                  const savedNote = calendarNotes[calNoteDate] || "";
-                  const dateLabel = new Date(calNoteDate + "T12:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
-                  const dayEvs = eventMap[calNoteDate] || [];
-                  return (
-                    <div className="w-72 shrink-0 sticky top-4">
-                      <Card className="p-4 border-blue-200 !bg-blue-50 space-y-3">
-                        <div className="flex items-start justify-between gap-2">
-                          <h3 className="text-xs font-bold text-blue-800 flex items-center gap-1.5 leading-tight">
-                            <PenLine size={13} />{dateLabel}
-                          </h3>
-                          <button onClick={() => { setCalNoteDate(null); setCalNoteEditing(false); }} className="text-slate-400 hover:text-slate-600 text-lg leading-none shrink-0">&times;</button>
-                        </div>
-                        {dayEvs.length > 0 && (
-                          <div className="flex flex-wrap gap-1">
-                            {dayEvs.map((ev, i) => (
-                              <span key={i} className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium ${getChipStyle(ev)}`}>
-                                {getChipDot(ev)} {ev.label}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                        {calNoteEditing ? (
-                          <>
-                            <textarea
-                              value={calNoteDraft}
-                              onChange={e => setCalNoteDraft(e.target.value)}
-                              placeholder="Write your journal entry…"
-                              rows={8}
-                              autoFocus
-                              className="w-full text-sm border border-blue-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 resize-none"
-                            />
-                            <div className="flex items-center gap-2">
-                              <button
-                                onClick={() => {
-                                  if (calNoteDraft.trim()) { setCalendarNotes(prev => ({ ...prev, [calNoteDate]: calNoteDraft })); }
-                                  else { setCalendarNotes(prev => { const n = { ...prev }; delete n[calNoteDate]; return n; }); }
-                                  setCalNoteEditing(false);
-                                }}
-                                className="flex-1 px-3 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-                              >Save</button>
-                              <button
-                                onClick={() => { if (!savedNote) setCalNoteDate(null); setCalNoteEditing(false); setCalNoteDraft(savedNote); }}
-                                className="px-3 py-1.5 text-xs font-semibold border border-blue-300 text-blue-700 hover:bg-blue-100 rounded-lg transition-colors"
-                              >Cancel</button>
-                            </div>
-                          </>
-                        ) : savedNote ? (
-                          <>
-                            <div className="bg-white border border-blue-100 rounded-lg px-3 py-2 text-sm text-slate-700 whitespace-pre-wrap leading-relaxed min-h-[80px]">{savedNote}</div>
-                            <div className="flex items-center gap-2">
-                              <button
-                                onClick={() => { setCalNoteEditing(true); setCalNoteDraft(savedNote); }}
-                                className="flex-1 px-3 py-1.5 text-xs font-bold bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-lg transition-colors flex items-center justify-center gap-1"
-                              ><Pencil size={11} />Edit</button>
-                              <button
-                                onClick={() => { if (window.confirm("Delete this journal entry?")) { setCalendarNotes(prev => { const n = { ...prev }; delete n[calNoteDate]; return n; }); setCalNoteDate(null); setCalNoteEditing(false); } }}
-                                className="px-3 py-1.5 text-xs font-semibold border border-red-200 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                              >Delete</button>
-                            </div>
-                          </>
-                        ) : null}
-                      </Card>
-                    </div>
-                  );
-                })()}
-              </div>
-              {(() => {
-                const weekRows = [];
-                for (let i = 0; i < cells.length; i += 7) {
-                  const weekCells = cells.slice(i, i + 7).filter(Boolean);
-                  if (weekCells.length === 0) continue;
-                  const shootDays = weekCells.filter(c => c.evs.some(e => e.kind === "shoot")).length;
-                  const holdDayCount = weekCells.filter(c => c.evs.some(e => e.kind === "hold")).length;
-                  const travelDays = weekCells.filter(c => c.evs.some(e => e.kind === "travel")).length;
-                  const invDue = weekCells.filter(c => c.evs.some(e => e.kind === "inv-due" || e.kind === "inv-overdue")).length;
-                  if (shootDays + holdDayCount + travelDays + invDue === 0) continue;
-                  const weekLabel = new Date(weekCells[0].iso + "T12:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
-                  weekRows.push(
-                    <div key={weekCells[0].iso} className="flex items-center gap-2 text-[11px]">
-                      <span className="text-slate-400 font-mono w-16 shrink-0">{weekLabel}</span>
-                      {shootDays > 0 && <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 font-medium">🎬 {shootDays} shoot</span>}
-                      {holdDayCount > 0 && <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">⏸ {holdDayCount} hold</span>}
-                      {travelDays > 0 && <span className="px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 font-medium">✈️ {travelDays} travel</span>}
-                      {invDue > 0 && <span className="px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 font-medium">💰 {invDue} inv</span>}
-                    </div>
-                  );
-                }
-                if (weekRows.length === 0) return null;
-                return (
-                  <div className="bg-white border border-slate-200 rounded-xl px-4 py-3 space-y-1.5">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Week Summary</p>
-                    {weekRows}
-                  </div>
-                );
-              })()}
-
-              {/* Legend */}
-              <div className="flex flex-wrap items-center gap-2 pt-1">
-                {[{ kind: "shoot", label: "Shoot Day" }, { kind: "inv-due", label: "Payment Due" }, { kind: "inv-overdue", label: "Overdue" }, { kind: "inv-paid", label: "Inv. Paid" }].map(({ kind, label }) => (
-                  <span key={kind} className={`text-[10px] px-2.5 py-1 rounded-full font-medium ${kindStyle[kind]}`}>{kindDot[kind]} {label}</span>
-                ))}
-                {["soft", "hold", "locked", "travel", "prep", "scout", "wrap"].map(t => (
-                  <span key={t} className={`text-[10px] px-2.5 py-1 rounded-full font-medium ${holdTypeStyle[t]}`}>{holdTypeDot[t]} {holdTypeLabel[t]}</span>
-                ))}
-                <span className="text-[10px] px-2.5 py-1 rounded-full font-medium bg-blue-100 text-blue-700">📝 Note</span>
-              </div>
-
-              {/* Upcoming events */}
-              {(() => {
-                const upcoming = Object.entries(eventMap)
-                  .filter(([d]) => d >= today)
-                  .sort(([a], [b]) => a.localeCompare(b))
-                  .slice(0, 8)
-                  .flatMap(([d, evs]) => evs.map(ev => ({ ...ev, date: d })));
-                if (upcoming.length === 0) return null;
-                return (
-                  <Card className="p-5">
-                    <h3 className="text-sm font-bold text-slate-700 mb-3 flex items-center gap-2"><CalendarClock size={15} className="text-blue-500" />Upcoming Events</h3>
-                    <div className="space-y-2">
-                      {upcoming.map((ev, i) => (
-                        <div key={i} className="flex items-center gap-3">
-                          <span className="text-xs font-mono text-slate-500 w-24 shrink-0">{new Date(ev.date + "T12:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>
-                          <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${getChipStyle(ev)}`}>{getChipDot(ev)} {ev.kind === "shoot" ? "Shoot" : ev.holdType ? holdTypeLabel[ev.holdType] : ev.kind === "travel" ? "Travel" : "Invoice"}</span>
-                          <span className="text-sm text-slate-700 truncate">{ev.label}</span>
-                          {ev.amount && <span className="text-xs font-semibold text-slate-500 ml-auto shrink-0">${(parseFloat(ev.amount)||0).toLocaleString(undefined,{minimumFractionDigits:2})}</span>}
-                          {ev.holdId && <button onClick={() => setHoldReleaseModal({ holdId: ev.holdId, date: ev.date })} className="ml-auto text-slate-300 hover:text-amber-500 text-sm leading-none shrink-0" title="Release options">&times;</button>}
-                        </div>
-                      ))}
-                    </div>
-                  </Card>
-                );
-              })()}
-            </div>
-          );
-        })()}
-
+        {activeTab === "calendar" && (
+          <CalendarTab
+            timecards={timecards}
+            invoices={invoices}
+            holdDays={holdDays}
+            calendarNotes={calendarNotes}
+            setCalendarNotes={setCalendarNotes}
+            calMonth={calMonth}
+            setCalMonth={setCalMonth}
+            calYear={calYear}
+            setCalYear={setCalYear}
+            calSelectMode={calSelectMode}
+            setCalSelectMode={setCalSelectMode}
+            calSelectedDates={calSelectedDates}
+            setCalSelectedDates={setCalSelectedDates}
+            setHoldNameInput={setHoldNameInput}
+            setHoldTypeInput={setHoldTypeInput}
+            setHoldNamePrompt={setHoldNamePrompt}
+            setHoldReleaseModal={setHoldReleaseModal}
+            calNoteDate={calNoteDate}
+            setCalNoteDate={setCalNoteDate}
+            calNoteEditing={calNoteEditing}
+            setCalNoteEditing={setCalNoteEditing}
+            calNoteDraft={calNoteDraft}
+            setCalNoteDraft={setCalNoteDraft}
+          />
+        )}
         {activeTab === "mileage" && (
-          <>
-            {/* Stats */}
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-              <Card className="p-6 bg-emerald-50 border-emerald-200 col-span-2 md:col-span-1">
-                <p className="text-emerald-700 text-sm font-medium">Total Miles</p>
-                <h2 className="text-3xl font-bold mt-1 text-emerald-700">{totalMiles.toLocaleString(undefined, { maximumFractionDigits: 1 })} mi</h2>
-              </Card>
-              <Card className="p-6">
-                <p className="text-slate-500 text-sm font-medium">IRS Write-Off Value</p>
-                <h2 className="text-3xl font-bold mt-1 text-emerald-600">${totalMileageValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-                <p className="text-[10px] text-slate-400 mt-1">@ ${IRS_MILEAGE_RATE}/mi (2025 IRS rate)</p>
-              </Card>
-              <Card className="p-6">
-                <p className="text-slate-500 text-sm font-medium">From Timecards</p>
-                <h2 className="text-3xl font-bold mt-1 text-blue-600">{allMileageEntries.filter(m => m.source === "timecard").length}</h2>
-              </Card>
-              <Card className="p-6">
-                <p className="text-slate-500 text-sm font-medium">Standalone Entries</p>
-                <h2 className="text-3xl font-bold mt-1 text-slate-700">{allMileageEntries.filter(m => m.source === "manual").length}</h2>
-              </Card>
-              <Card className="p-6">
-                <p className="text-slate-500 text-sm font-medium">Vehicle Expenses</p>
-                <h2 className="text-3xl font-bold mt-1 text-amber-600">${totalVehicleExpenses.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-              </Card>
-              <Card className="p-6">
-                <p className="text-slate-500 text-sm font-medium">Gas Spent</p>
-                <h2 className="text-3xl font-bold mt-1 text-orange-500">${totalGasCost.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
-              </Card>
-            </div>
-
-            {/* Sub-tabs */}
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
-                <button onClick={() => setMileageSubTab("mileage")}
-                  className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${mileageSubTab === "mileage" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                  <MapPin size={14} className="inline mr-1.5 -mt-0.5" />Mileage
-                </button>
-                <button onClick={() => setMileageSubTab("vehicle")}
-                  className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${mileageSubTab === "vehicle" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                  <Wrench size={14} className="inline mr-1.5 -mt-0.5" />Vehicle Expenses
-                </button>
-                <button onClick={() => setMileageSubTab("gas")}
-                  className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${mileageSubTab === "gas" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
-                  <Fuel size={14} className="inline mr-1.5 -mt-0.5" />Gas
-                </button>
-              </div>
-              {mileageSubTab === "mileage" && allMileageEntries.length > 0 && (
-                <div className="flex items-center gap-2">
-                  <Button onClick={() => {
-                    const IRS_RATE = selectedYear >= 2025 ? 0.70 : 0.67;
-                    const header = ["Date", "Miles", "Purpose", "Company", "Job", "Vehicle", "Type", `Deduction @ $${IRS_RATE}/mi`];
-                    const rows = allMileageEntries.map(m => [
-                      m.date || "", parseFloat(m.miles) || 0, m.purpose || "", m.company || "",
-                      m.jobId ? (jobs.find(j => j.id === m.jobId)?.name || m.jobId) : "",
-                      m.vehicle || "", m.source || "manual",
-                      ((parseFloat(m.miles) || 0) * IRS_RATE).toFixed(2),
-                    ]);
-                    downloadCSV([header, ...rows], `mileage_${selectedYear}.csv`);
-                  }} variant="outline" className="gap-1.5 border-slate-300 text-slate-600 hover:bg-slate-50">
-                    <FileDown size={14} />CSV
-                  </Button>
-                  <Button onClick={generateMileageReport} className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white">
-                    <FileText size={14} />Tax Report
-                  </Button>
-                </div>
-              )}
-              {mileageSubTab === "vehicle" && filteredVehicleExpenses.length > 0 && (
-                <div className="flex items-center gap-2">
-                  <Button onClick={() => {
-                    const header = ["Date", "Category", "Vehicle", "Odometer (mi)", "Amount ($)", "Notes"];
-                    const rows = filteredVehicleExpenses.map(v => [v.date || "", v.category || "", v.vehicle || "", v.odometer || "", v.amount || 0, v.notes || ""]);
-                    downloadCSV([header, ...rows], `vehicle_expenses_${selectedYear}.csv`);
-                  }} variant="outline" className="gap-1.5 border-slate-300 text-slate-600 hover:bg-slate-50">
-                    <FileDown size={14} />CSV
-                  </Button>
-                  <Button onClick={() => generateExpenseReport("vehicle")} className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white">
-                    <Receipt size={14} />Receipts PDF
-                  </Button>
-                </div>
-              )}
-              {mileageSubTab === "gas" && filteredGasLogs.length > 0 && (
-                <div className="flex items-center gap-2">
-                  <Button onClick={() => {
-                    const header = ["Date", "Vehicle", "Station", "Price/Gallon ($)", "Total Amount ($)", "Notes"];
-                    const rows = filteredGasLogs.map(g => [g.date || "", g.vehicle || "", g.station || "", g.pricePerGallon || "", g.amount || 0, g.notes || ""]);
-                    downloadCSV([header, ...rows], `gas_logs_${selectedYear}.csv`);
-                  }} variant="outline" className="gap-1.5 border-slate-300 text-slate-600 hover:bg-slate-50">
-                    <FileDown size={14} />CSV
-                  </Button>
-                  <Button onClick={() => generateExpenseReport("gas")} className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white">
-                    <Receipt size={14} />Receipts PDF
-                  </Button>
-                </div>
-              )}
-            </div>
-
-            {/* Vehicle manager */}
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-slate-400">Add your vehicles for quick-select in mileage and expense entries.</span>
-              <Button variant="outline" onClick={() => setShowVehicleManager(p => !p)} className="text-xs h-8">
-                <Car size={13} className="mr-1.5" />{showVehicleManager ? "Hide" : "Manage Vehicles"}
-              </Button>
-            </div>
-            {showVehicleManager && (
-              <Card className="p-4">
-                <h4 className="text-sm font-bold mb-3">Saved Vehicles</h4>
-                <div className="flex flex-wrap gap-2 mb-3">
-                  {vehicles.length === 0 && <span className="text-xs text-slate-400 italic">No vehicles saved yet.</span>}
-                  {vehicles.map(v => (
-                    <span key={v} className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full px-3 py-1 text-xs font-medium">
-                      <Car size={11} className="shrink-0" />{v}
-                      <button onClick={() => setVehicles(prev => prev.filter(x => x !== v))} className="text-emerald-400 hover:text-red-500 transition-colors" title="Remove"><X size={11} /></button>
-                    </span>
-                  ))}
-                </div>
-                <form onSubmit={e => { e.preventDefault(); const val = newVehicleName.trim(); if (val && !vehicles.includes(val)) { setVehicles(prev => [...prev, val].sort()); } setNewVehicleName(""); }} className="flex gap-2">
-                  <Input value={newVehicleName} onChange={e => setNewVehicleName(e.target.value)} placeholder='e.g. "2019 Honda Fit", "Ford Transit"' className="flex-1" />
-                  <Button type="submit" disabled={!newVehicleName.trim()}><Plus size={14} className="mr-1" />Add</Button>
-                </form>
-              </Card>
-            )}
-
-            {/* ── Mileage sub-tab ── */}
-            {mileageSubTab === "mileage" && (
-              <>
-                <Card className="p-6">
-                  <h3 className="text-base font-bold mb-4">Log Mileage Entry</h3>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end">
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Date</label>
-                      <Input type="date" value={newMileage.date} onChange={e => setNewMileage(p => ({ ...p, date: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Vehicle</label>
-                      <select value={newMileage.vehicle} onChange={e => setNewMileage(p => ({ ...p, vehicle: e.target.value }))}
-                        className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
-                        <option value="">— Select vehicle —</option>
-                        {vehicles.map(v => <option key={v} value={v}>{v}</option>)}
-                      </select>
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Miles</label>
-                      <Input type="number" value={newMileage.miles} onChange={e => setNewMileage(p => ({ ...p, miles: e.target.value }))} placeholder="e.g. 42" />
-                    </div>
-                    <div className="space-y-1 lg:col-span-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Purpose / Notes</label>
-                      <Input value={newMileage.purpose} onChange={e => setNewMileage(p => ({ ...p, purpose: e.target.value }))} placeholder="e.g. Location scout, equipment pickup" />
-                    </div>
-                    <div className="space-y-1 lg:col-span-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Production Company</label>
-                      {clients.length > 0 && (
-                        <select value="" onChange={e => { if (e.target.value) setNewMileage(p => ({ ...p, company: e.target.value })); }}
-                          className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 mb-1">
-                          <option value="">— Saved client —</option>
-                          {clients.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
-                        </select>
-                      )}
-                      <Input value={newMileage.company} onChange={e => setNewMileage(p => ({ ...p, company: e.target.value }))} placeholder="e.g. Self, KISSD Honda" />
-                    </div>
-                    <div className="space-y-1 lg:col-span-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Job (optional)</label>
-                      <select value={newMileage.jobId} onChange={e => setNewMileage(p => ({ ...p, jobId: e.target.value }))}
-                        className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
-                        <option value="">— Unassigned —</option>
-                        {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
-                      </select>
-                    </div>
-                    <Button onClick={addMileageLog} className="h-10"><Plus size={16} className="mr-1.5" /> Add</Button>
-                  </div>
-                </Card>
-
-                {(() => {
-                  const tcEntries = allMileageEntries.filter(m => m.source === "timecard");
-                  const manualEntries = allMileageEntries.filter(m => m.source === "manual");
-                  return (
-                    <div className="space-y-6">
-                      <div>
-                        <h3 className="text-lg font-bold flex items-center gap-2 mb-3">
-                          <Clock size={16} className="text-blue-500" />From Timecards
-                          <span className="text-slate-400 font-normal text-sm">— {selectedYear}</span>
-                        </h3>
-                        {tcEntries.length === 0 ? (
-                          <div className="py-12 text-center bg-white border-2 border-dashed border-slate-200 rounded-2xl">
-                            <MapPin size={28} className="mx-auto mb-2 text-slate-300" />
-                            <p className="text-slate-500 text-sm">No timecard mileage for {selectedYear}. Add miles to a timecard to see it here.</p>
-                          </div>
-                        ) : (
-                          <div className="space-y-2">
-                            {tcEntries.map(m => (
-                              <Card key={m.id} className="p-4 flex items-center justify-between gap-3 flex-wrap">
-                                <div className="flex items-center gap-3 flex-wrap">
-                                  <span className="text-xs font-bold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">Timecard</span>
-                                  <span className="text-sm font-bold text-slate-800">{m.miles} mi</span>
-                                  <span className="text-xs text-slate-500">{m.date}</span>
-                                  {m.company && <span className="text-xs text-slate-600 font-medium">{m.company}</span>}
-                                  {m.jobName && <span className="text-xs text-slate-400">{m.jobName}</span>}
-                                  {m.purpose && <span className="text-xs text-slate-400 italic">{m.purpose}</span>}
-                                </div>
-                                <span className="text-sm font-bold text-emerald-600">${((parseFloat(m.miles) || 0) * IRS_MILEAGE_RATE).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                              </Card>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-
-                      <div>
-                        <h3 className="text-lg font-bold flex items-center gap-2 mb-3">
-                          <MapPin size={16} className="text-emerald-600" />Standalone Entries
-                          <span className="text-slate-400 font-normal text-sm">— write-offs &amp; unreimbursed</span>
-                        </h3>
-                        {manualEntries.length === 0 ? (
-                          <div className="py-12 text-center bg-white border-2 border-dashed border-slate-200 rounded-2xl">
-                            <MapPin size={28} className="mx-auto mb-2 text-slate-300" />
-                            <p className="text-slate-500 text-sm">No standalone entries for {selectedYear}. Use the form above to log mileage not tied to a timecard.</p>
-                          </div>
-                        ) : (
-                          <div className="space-y-2">
-                            {manualEntries.map(m => (
-                              <Card key={m.id} className="p-4 flex items-center justify-between gap-3 flex-wrap">
-                                <div className="flex items-center gap-3 flex-wrap">
-                                  <span className="text-xs font-bold bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">Manual</span>
-                                  <span className="text-sm font-bold text-slate-800">{m.miles} mi</span>
-                                  <span className="text-xs text-slate-500">{m.date}</span>
-                                  {m.vehicle && <span className="text-xs font-medium text-slate-700 flex items-center gap-1"><Car size={11} />{m.vehicle}</span>}
-                                  {m.company && <span className="text-xs text-slate-600 font-medium">{m.company}</span>}
-                                  {m.purpose && <span className="text-xs text-slate-400 italic">{m.purpose}</span>}
-                                  {m.jobId && jobs.find(j => j.id === m.jobId) && <span className="text-xs text-slate-400">{jobs.find(j => j.id === m.jobId).name}</span>}
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-sm font-bold text-emerald-600">${((parseFloat(m.miles) || 0) * IRS_MILEAGE_RATE).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                                  <Button variant="danger" onClick={() => { if (window.confirm("Delete this mileage entry?")) setMileageLogs(prev => prev.filter(x => x.id !== m.id)); }} className="!p-1.5"><Trash2 size={13} /></Button>
-                                </div>
-                              </Card>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })()}
-              </>
-            )}
-
-            {/* ── Vehicle Expenses sub-tab ── */}
-            {mileageSubTab === "vehicle" && (
-              <>
-                <Card className="p-5">
-                  <h3 className="text-base font-bold mb-3">Log Vehicle Expense</h3>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end">
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Date</label>
-                      <Input type="date" value={newVehicleExpense.date} onChange={e => setNewVehicleExpense(p => ({ ...p, date: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Vehicle</label>
-                      <select value={newVehicleExpense.vehicle} onChange={e => setNewVehicleExpense(p => ({ ...p, vehicle: e.target.value }))}
-                        className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
-                        <option value="">— Select vehicle —</option>
-                        {vehicles.map(v => <option key={v} value={v}>{v}</option>)}
-                      </select>
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Category</label>
-                      <select value={newVehicleExpense.category} onChange={e => setNewVehicleExpense(p => ({ ...p, category: e.target.value }))}
-                        className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
-                        {VEHICLE_EXPENSE_CATEGORIES.map(c => <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>)}
-                      </select>
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Odometer (mi)</label>
-                      <Input type="number" value={newVehicleExpense.odometer} onChange={e => setNewVehicleExpense(p => ({ ...p, odometer: e.target.value }))} placeholder="e.g. 48250" />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Amount ($)</label>
-                      <Input type="number" value={newVehicleExpense.amount} onChange={e => setNewVehicleExpense(p => ({ ...p, amount: e.target.value }))} placeholder="0.00" />
-                    </div>
-                    <div className="space-y-1 lg:col-span-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Notes (optional)</label>
-                      <Input value={newVehicleExpense.notes} onChange={e => setNewVehicleExpense(p => ({ ...p, notes: e.target.value }))} placeholder="e.g. Jiffy Lube, Goodyear 4x tires" />
-                    </div>
-                    <Button onClick={addVehicleExpense} disabled={!newVehicleExpense.amount || parseFloat(newVehicleExpense.amount) <= 0} className="h-10">
-                      <Plus size={16} className="mr-1.5" /> Add
-                    </Button>
-                  </div>
-                </Card>
-
-                {filteredVehicleExpenses.length === 0 ? (
-                  <div className="py-12 text-center bg-white border-2 border-dashed border-slate-200 rounded-2xl">
-                    <Wrench size={28} className="mx-auto mb-2 text-slate-300" />
-                    <p className="text-slate-500 text-sm">No vehicle expenses for {selectedYear}. Use the form above to log maintenance, insurance, and more.</p>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {filteredVehicleExpenses.sort((a, b) => b.date.localeCompare(a.date)).map(v => {
-                      const catColors = {
-                        maintenance: "bg-amber-100 text-amber-700",
-                        repairs: "bg-red-100 text-red-700",
-                        tires: "bg-slate-100 text-slate-700",
-                        insurance: "bg-blue-100 text-blue-700",
-                        "oil change": "bg-orange-100 text-orange-700",
-                        registration: "bg-violet-100 text-violet-700",
-                        other: "bg-gray-100 text-gray-600",
-                      };
-                      const colorClass = catColors[v.category] || catColors.other;
-                      const idx = vehicleExpenses.findIndex(x => x.id === v.id);
-                      const upd = (field, val) => { const n = [...vehicleExpenses]; n[idx] = { ...n[idx], [field]: val }; setVehicleExpenses(n); };
-                      return (
-                        <Card key={v.id} className="p-4 space-y-2">
-                          <div className="flex items-center justify-between gap-2 flex-wrap">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <select value={v.category} onChange={e => upd("category", e.target.value)}
-                                className={`text-[10px] font-bold uppercase tracking-wider border rounded px-2 py-0.5 focus:outline-none cursor-pointer ${colorClass} border-transparent`}>
-                                {VEHICLE_EXPENSE_CATEGORIES.map(c => <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>)}
-                              </select>
-                              {v.vehicle && <span className="text-xs font-medium text-slate-700 flex items-center gap-1"><Car size={11} />{v.vehicle}</span>}
-                              <Input type="date" value={v.date} onChange={e => upd("date", e.target.value)} className="w-36 !py-1 !text-xs" />
-                            </div>
-                            <div className="flex items-center gap-2 shrink-0">
-                              <span className="text-sm font-bold text-amber-600">${(parseFloat(v.amount) || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                              <Button variant="danger" onClick={() => { if (window.confirm("Delete this vehicle expense?")) setVehicleExpenses(prev => prev.filter(x => x.id !== v.id)); }} className="!p-1.5"><Trash2 size={13} /></Button>
-                            </div>
-                          </div>
-                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 items-end">
-                            <div className="space-y-0.5">
-                              <label className="text-[9px] font-bold text-slate-400 uppercase">Vehicle</label>
-                              <select value={v.vehicle || ""} onChange={e => upd("vehicle", e.target.value)}
-                                className="flex w-full rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500/20 focus:border-blue-500">
-                                <option value="">— None —</option>
-                                {vehicles.map(ve => <option key={ve} value={ve}>{ve}</option>)}
-                              </select>
-                            </div>
-                            <div className="space-y-0.5">
-                              <label className="text-[9px] font-bold text-slate-400 uppercase">Odometer (mi)</label>
-                              <Input type="number" value={v.odometer || ""} onChange={e => upd("odometer", e.target.value)} placeholder="e.g. 48250" className="!py-1.5 !text-xs font-mono" />
-                            </div>
-                            <div className="space-y-0.5">
-                              <label className="text-[9px] font-bold text-slate-400 uppercase">Amount ($)</label>
-                              <Input type="number" value={v.amount} onChange={e => upd("amount", parseFloat(e.target.value) || 0)} className="!py-1.5 !text-xs font-mono" />
-                            </div>
-                            <div className="space-y-0.5">
-                              <label className="text-[9px] font-bold text-slate-400 uppercase">Notes</label>
-                              <Input value={v.notes || ""} onChange={e => upd("notes", e.target.value)} placeholder="Notes" className="!py-1.5 !text-xs" />
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2 pt-1">
-                            <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 transition-colors">
-                              <UploadCloud size={12} />{v.receiptFileId ? "Replace Receipt" : "Upload Receipt"}
-                              <input type="file" className="hidden" accept="image/*,application/pdf" onChange={async e => { const file = e.target.files?.[0]; if (file) await uploadReceiptForExpense(v.id, file); e.target.value = ""; }} />
-                            </label>
-                            {v.receiptFileId && (
-                              <a href={`https://drive.google.com/file/d/${v.receiptFileId}/view`} target="_blank" rel="noreferrer"
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-200 text-xs text-emerald-600 hover:bg-emerald-50 transition-colors">
-                                <ExternalLink size={12} />View Receipt
-                              </a>
-                            )}
-                          </div>
-                        </Card>
-                      );
-                    })}
-                    <div className="flex justify-end pt-1">
-                      <span className="text-sm font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2">
-                        Total: ${totalVehicleExpenses.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                      </span>
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-
-            {/* ── Gas sub-tab ── */}
-            {mileageSubTab === "gas" && (
-              <>
-                <Card className="p-5">
-                  <h3 className="text-base font-bold mb-3">Log Gas Fill-Up</h3>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end">
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Date</label>
-                      <Input type="date" value={newGasLog.date} onChange={e => setNewGasLog(p => ({ ...p, date: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Vehicle</label>
-                      <select value={newGasLog.vehicle} onChange={e => setNewGasLog(p => ({ ...p, vehicle: e.target.value }))}
-                        className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500">
-                        <option value="">— Select vehicle —</option>
-                        {vehicles.map(v => <option key={v} value={v}>{v}</option>)}
-                      </select>
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Gas Station</label>
-                      <Input value={newGasLog.station} onChange={e => setNewGasLog(p => ({ ...p, station: e.target.value }))} placeholder="e.g. Shell, Chevron" />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Price / Gallon (opt.)</label>
-                      <Input type="number" value={newGasLog.pricePerGallon} onChange={e => setNewGasLog(p => ({ ...p, pricePerGallon: e.target.value }))} placeholder="e.g. 4.59" />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Total Amount ($)</label>
-                      <Input type="number" value={newGasLog.amount} onChange={e => setNewGasLog(p => ({ ...p, amount: e.target.value }))} placeholder="0.00" />
-                    </div>
-                    <div className="space-y-1 lg:col-span-2">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase">Notes (optional)</label>
-                      <Input value={newGasLog.notes} onChange={e => setNewGasLog(p => ({ ...p, notes: e.target.value }))} placeholder="e.g. Full tank, topped off" />
-                    </div>
-                    <Button onClick={addGasLog} disabled={!newGasLog.amount || parseFloat(newGasLog.amount) <= 0} className="h-10">
-                      <Plus size={16} className="mr-1.5" /> Add
-                    </Button>
-                  </div>
-                </Card>
-
-                {filteredGasLogs.length === 0 ? (
-                  <div className="py-12 text-center bg-white border-2 border-dashed border-slate-200 rounded-2xl">
-                    <Fuel size={28} className="mx-auto mb-2 text-slate-300" />
-                    <p className="text-slate-500 text-sm">No gas logs for {selectedYear}. Use the form above to track fill-ups.</p>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {filteredGasLogs.sort((a, b) => b.date.localeCompare(a.date)).map(g => {
-                      const idx = gasLogs.findIndex(x => x.id === g.id);
-                      const upd = (field, val) => { const n = [...gasLogs]; n[idx] = { ...n[idx], [field]: val }; setGasLogs(n); };
-                      return (
-                        <Card key={g.id} className="p-4 space-y-2">
-                          <div className="flex items-center justify-between gap-2 flex-wrap">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="text-[10px] font-bold uppercase tracking-wider bg-orange-100 text-orange-700 rounded px-2 py-0.5 flex items-center gap-1">
-                                <Fuel size={10} />Gas
-                              </span>
-                              {g.vehicle && <span className="text-xs font-medium text-slate-700 flex items-center gap-1"><Car size={11} />{g.vehicle}</span>}
-                              <Input type="date" value={g.date} onChange={e => upd("date", e.target.value)} className="w-36 !py-1 !text-xs" />
-                            </div>
-                            <div className="flex items-center gap-2 shrink-0">
-                              <span className="text-sm font-bold text-orange-500">${(parseFloat(g.amount) || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-                              <Button variant="danger" onClick={() => { if (window.confirm("Delete this gas log entry?")) setGasLogs(prev => prev.filter(x => x.id !== g.id)); }} className="!p-1.5"><Trash2 size={13} /></Button>
-                            </div>
-                          </div>
-                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 items-end">
-                            <div className="space-y-0.5">
-                              <label className="text-[9px] font-bold text-slate-400 uppercase">Vehicle</label>
-                              <select value={g.vehicle || ""} onChange={e => upd("vehicle", e.target.value)}
-                                className="flex w-full rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500/20 focus:border-blue-500">
-                                <option value="">— None —</option>
-                                {vehicles.map(ve => <option key={ve} value={ve}>{ve}</option>)}
-                              </select>
-                            </div>
-                            <div className="space-y-0.5">
-                              <label className="text-[9px] font-bold text-slate-400 uppercase">Gas Station</label>
-                              <Input value={g.station || ""} onChange={e => upd("station", e.target.value)} placeholder="Station name" className="!py-1.5 !text-xs" />
-                            </div>
-                            <div className="space-y-0.5">
-                              <label className="text-[9px] font-bold text-slate-400 uppercase">Price / Gallon</label>
-                              <Input type="number" value={g.pricePerGallon || ""} onChange={e => upd("pricePerGallon", e.target.value)} placeholder="e.g. 4.59" className="!py-1.5 !text-xs font-mono" />
-                            </div>
-                            <div className="space-y-0.5">
-                              <label className="text-[9px] font-bold text-slate-400 uppercase">Total Amount ($)</label>
-                              <Input type="number" value={g.amount} onChange={e => upd("amount", parseFloat(e.target.value) || 0)} className="!py-1.5 !text-xs font-mono" />
-                            </div>
-                            <div className="space-y-0.5 sm:col-span-4">
-                              <label className="text-[9px] font-bold text-slate-400 uppercase">Notes</label>
-                              <Input value={g.notes || ""} onChange={e => upd("notes", e.target.value)} placeholder="Notes" className="!py-1.5 !text-xs" />
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2 pt-1">
-                            <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 transition-colors">
-                              <UploadCloud size={12} />{g.receiptFileId ? "Replace Receipt" : "Upload Receipt"}
-                              <input type="file" className="hidden" accept="image/*,application/pdf" onChange={async e => { const file = e.target.files?.[0]; if (file) await uploadReceiptForGas(g.id, file); e.target.value = ""; }} />
-                            </label>
-                            {g.receiptFileId && (
-                              <a href={`https://drive.google.com/file/d/${g.receiptFileId}/view`} target="_blank" rel="noreferrer"
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-200 text-xs text-emerald-600 hover:bg-emerald-50 transition-colors">
-                                <ExternalLink size={12} />View Receipt
-                              </a>
-                            )}
-                          </div>
-                        </Card>
-                      );
-                    })}
-                    <div className="flex justify-end pt-1">
-                      <span className="text-sm font-bold text-orange-700 bg-orange-50 border border-orange-200 rounded-lg px-4 py-2">
-                        Total: ${totalGasCost.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                      </span>
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-          </>
+          <MileageTab
+            selectedYear={selectedYear}
+            allMileageEntries={allMileageEntries}
+            totalMiles={totalMiles}
+            totalMileageValue={totalMileageValue}
+            totalVehicleExpenses={totalVehicleExpenses}
+            totalGasCost={totalGasCost}
+            mileageSubTab={mileageSubTab}
+            setMileageSubTab={setMileageSubTab}
+            newMileage={newMileage}
+            setNewMileage={setNewMileage}
+            addMileageLog={addMileageLog}
+            mileageLogs={mileageLogs}
+            setMileageLogs={setMileageLogs}
+            vehicles={vehicles}
+            setVehicles={setVehicles}
+            showVehicleManager={showVehicleManager}
+            setShowVehicleManager={setShowVehicleManager}
+            newVehicleName={newVehicleName}
+            setNewVehicleName={setNewVehicleName}
+            clients={clients}
+            jobs={jobs}
+            newVehicleExpense={newVehicleExpense}
+            setNewVehicleExpense={setNewVehicleExpense}
+            addVehicleExpense={addVehicleExpense}
+            vehicleExpenses={vehicleExpenses}
+            setVehicleExpenses={setVehicleExpenses}
+            filteredVehicleExpenses={filteredVehicleExpenses}
+            uploadReceiptForExpense={uploadReceiptForExpense}
+            newGasLog={newGasLog}
+            setNewGasLog={setNewGasLog}
+            addGasLog={addGasLog}
+            gasLogs={gasLogs}
+            setGasLogs={setGasLogs}
+            filteredGasLogs={filteredGasLogs}
+            uploadReceiptForGas={uploadReceiptForGas}
+            generateMileageReport={generateMileageReport}
+            generateExpenseReport={generateExpenseReport}
+          />
         )}
 
         {/* ── Quarterly Tax Estimator Tab ── */}
-        {activeTab === "tax" && (() => {
-          const taxYear = selectedYear;
-          const taxInvoices = invoices.filter(inv => (inv.date || "").startsWith(String(taxYear)));
+        {activeTab === "tax" && (
+          <TaxTab
+            selectedYear={selectedYear}
+            allYears={allYears}
+            setSelectedYear={setSelectedYear}
+            invoices={invoices}
+            purchases={purchases}
+            mileageLogs={mileageLogs}
+            timecards={timecards}
+            gasLogs={gasLogs}
+            vehicleExpenses={vehicleExpenses}
+          />
+        )}
 
-          const taxGrossInvoiced = taxInvoices.reduce((a, inv) => a + (parseFloat(inv.amount) || 0), 0);
-          const taxIncomeReceived = taxInvoices.reduce((a, inv) => {
-            const s = computeInvoiceStatus(inv);
-            if (s === "Paid") return a + (parseFloat(inv.amount) || 0);
-            return a + (parseFloat(inv.amountReceived) || 0);
-          }, 0);
-          const taxIncomeOutstanding = taxGrossInvoiced - taxIncomeReceived;
-
-          const taxPurchaseItems = purchases.filter(p => (p.date || "").startsWith(String(taxYear)));
-          const taxExpendables = taxPurchaseItems.filter(p => p.category === "expendables").reduce((a, p) => a + (parseFloat(p.amount) || 0), 0);
-          const taxEquipmentItems = taxPurchaseItems.filter(p => p.category === "equipment");
-          const taxEquipment = taxEquipmentItems.reduce((a, p) => a + calcEquipDeduction(p, taxYear), 0);
-          const taxMealsTotal = taxPurchaseItems.filter(p => p.category === "meals").reduce((a, p) => a + (parseFloat(p.amount) || 0), 0);
-          const taxMealsDeductible = taxMealsTotal * 0.5;
-
-          const IRS_RATE = taxYear >= 2025 ? 0.70 : 0.67;
-          const taxManualMiles = mileageLogs.filter(m => (m.date || "").startsWith(String(taxYear))).reduce((a, m) => a + (parseFloat(m.miles) || 0), 0);
-          const taxTimecardMiles = timecards.filter(tc => (tc.date || "").startsWith(String(taxYear))).reduce((a, tc) => a + (parseFloat(tc.mileage) || 0), 0);
-          const taxTotalMiles = taxManualMiles + taxTimecardMiles;
-          const taxMileageDeduction = taxTotalMiles * IRS_RATE;
-
-          const taxGasTotal = gasLogs.filter(g => (g.date || "").startsWith(String(taxYear))).reduce((a, g) => a + (parseFloat(g.amount) || 0), 0);
-          const taxVehicleTotal = vehicleExpenses.filter(v => (v.date || "").startsWith(String(taxYear))).reduce((a, v) => a + (parseFloat(v.amount) || 0), 0);
-
-          const taxTotalDeductions = taxExpendables + taxEquipment + taxMealsDeductible + taxMileageDeduction;
-          const taxNetSEIncome = Math.max(0, taxIncomeReceived - taxTotalDeductions);
-
-          const SS_WAGE_BASE = 176100;
-          const seBase = taxNetSEIncome * 0.9235;
-          const seTaxSS = Math.min(seBase, SS_WAGE_BASE) * 0.124;
-          const seTaxMedicare = seBase * 0.029;
-          const seTax = seTaxSS + seTaxMedicare;
-          const deductibleSE = seTax / 2;
-
-          const agi = taxNetSEIncome - deductibleSE;
-          const STANDARD_DEDUCTION = 14600;
-          const taxableIncome = Math.max(0, agi - STANDARD_DEDUCTION);
-          const TAX_BRACKETS = [
-            { min: 0, max: 11925, rate: 0.10 },
-            { min: 11925, max: 48475, rate: 0.12 },
-            { min: 48475, max: 103350, rate: 0.22 },
-            { min: 103350, max: 197300, rate: 0.24 },
-            { min: 197300, max: 250525, rate: 0.32 },
-            { min: 250525, max: 626350, rate: 0.35 },
-            { min: 626350, max: Infinity, rate: 0.37 },
-          ];
-          let fedTax = 0; let rem = taxableIncome;
-          for (const b of TAX_BRACKETS) { if (rem <= 0) break; const taxable = Math.min(rem, b.max - b.min); fedTax += taxable * b.rate; rem -= taxable; }
-
-          const totalEstTax = seTax + fedTax;
-          const qPayment = totalEstTax / 4;
-          const QUARTERLY = [
-            { label: "Q1 (Jan – Mar)", period: `Jan 1 – Mar 31, ${taxYear}`, due: `April 15, ${taxYear}` },
-            { label: "Q2 (Apr – May)", period: `Apr 1 – May 31, ${taxYear}`, due: `June 15, ${taxYear}` },
-            { label: "Q3 (Jun – Aug)", period: `Jun 1 – Aug 31, ${taxYear}`, due: `September 15, ${taxYear}` },
-            { label: "Q4 (Sep – Dec)", period: `Sep 1 – Dec 31, ${taxYear}`, due: `January 15, ${taxYear + 1}` },
-          ];
-          const fmt = n => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-          return (
-            <div className="space-y-6 pb-8">
-              {/* Year selector */}
-              <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Tax Year</span>
-                {allYears.map(yr => (
-                  <button key={yr} onClick={() => setSelectedYear(yr)}
-                    className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-all border ${
-                      selectedYear === yr
-                        ? "bg-blue-600 text-white border-blue-600 shadow-sm"
-                        : "bg-white text-slate-600 border-slate-200 hover:border-blue-300 hover:text-blue-600"
-                    }`}>
-                    {yr}{yr === new Date().getFullYear() ? " ✦" : ""}
-                  </button>
-                ))}
-              </div>
-              <div>
-                <h2 className="text-2xl font-bold">Quarterly Tax Estimator</h2>
-                <p className="text-sm text-slate-500 mt-0.5">Estimated taxes for <strong>{taxYear}</strong> based on your tracked income &amp; deductions. Uses 2025 IRS rates — consult a tax professional for filing.</p>
-              </div>
-
-              {/* Income + Deductions */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <Card className="p-5 space-y-3">
-                  <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2"><FileText size={14} className="text-blue-500" />Income ({taxYear})</h3>
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">Total Invoiced</span><span className="font-semibold">${fmt(taxGrossInvoiced)}</span></div>
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">Total Received (cash basis)</span><span className="font-bold text-emerald-600">${fmt(taxIncomeReceived)}</span></div>
-                    {taxIncomeOutstanding > 0 && <div className="flex justify-between text-sm"><span className="text-slate-400 italic">Still outstanding</span><span className="text-amber-600">${fmt(taxIncomeOutstanding)}</span></div>}
-                  </div>
-                  <p className="text-[11px] text-slate-400 pt-2 border-t border-slate-100">Cash-basis: only counts payments received. Partial payments included.</p>
-                </Card>
-                <Card className="p-5 space-y-3">
-                  <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2"><ShoppingCart size={14} className="text-emerald-500" />Deductions ({taxYear})</h3>
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">Expendables</span><span className="font-semibold text-emerald-700">${fmt(taxExpendables)}</span></div>
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">Equipment</span><span className="font-semibold text-emerald-700">${fmt(taxEquipment)}</span></div>
-                    {taxEquipmentItems.some(p => (p.depreciationMethod || "section179") !== "section179" && (p.depreciationMethod || "section179") !== "bonus") && (
-                      <div className="ml-3 space-y-0.5 border-l-2 border-slate-100 pl-2">
-                        {taxEquipmentItems.map(p => { const d = calcEquipDeduction(p, taxYear); return d > 0 ? (
-                          <div key={p.id} className="flex justify-between text-xs text-slate-400">
-                            <span className="truncate max-w-[160px]">{p.name || "Item"} <span className="text-[9px] bg-slate-100 px-1 rounded">{DEPR_LABELS[p.depreciationMethod||"section179"]}</span></span>
-                            <span className="font-mono shrink-0">${fmt(d)}</span>
-                          </div>
-                        ) : null; })}
-                      </div>
-                    )}
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">Meals (50% of ${fmt(taxMealsTotal)})</span><span className="font-semibold text-emerald-700">${fmt(taxMealsDeductible)}</span></div>
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">Mileage ({taxTotalMiles.toLocaleString()} mi × ${IRS_RATE}/mi)</span><span className="font-semibold text-emerald-700">${fmt(taxMileageDeduction)}</span></div>
-                    {(taxGasTotal > 0 || taxVehicleTotal > 0) && (
-                      <div className="pt-1 border-t border-slate-100 space-y-1">
-                        <p className="text-[10px] text-slate-400 italic">Not included (covered by standard mileage rate):</p>
-                        {taxGasTotal > 0 && <div className="flex justify-between text-xs text-slate-400"><span>Gas logged</span><span>${fmt(taxGasTotal)}</span></div>}
-                        {taxVehicleTotal > 0 && <div className="flex justify-between text-xs text-slate-400"><span>Vehicle expenses</span><span>${fmt(taxVehicleTotal)}</span></div>}
-                      </div>
-                    )}
-                  </div>
-                  <div className="pt-2 border-t border-slate-100 flex justify-between font-bold text-sm">
-                    <span>Total Deductions</span><span className="text-emerald-700">${fmt(taxTotalDeductions)}</span>
-                  </div>
-                </Card>
-              </div>
-
-              {/* Tax calculation */}
-              <Card className="p-5 space-y-4">
-                <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2"><Calculator size={14} className="text-violet-500" />Tax Calculation (Single Filer Estimate)</h3>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                  <div className="space-y-2">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Self-Employment Tax</p>
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">Net SE income</span><span>${fmt(taxNetSEIncome)}</span></div>
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">SE base (× 92.35%)</span><span>${fmt(seBase)}</span></div>
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">Social Security (12.4%)</span><span>${fmt(seTaxSS)}</span></div>
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">Medicare (2.9%)</span><span>${fmt(seTaxMedicare)}</span></div>
-                    <div className="flex justify-between text-sm font-bold pt-1 border-t border-slate-100"><span>SE Tax Total</span><span className="text-red-600">${fmt(seTax)}</span></div>
-                  </div>
-                  <div className="space-y-2">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Federal Income Tax</p>
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">Net SE income</span><span>${fmt(taxNetSEIncome)}</span></div>
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">Less ½ SE deduction</span><span>– ${fmt(deductibleSE)}</span></div>
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">AGI</span><span>${fmt(agi)}</span></div>
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">Standard deduction</span><span>– ${fmt(STANDARD_DEDUCTION)}</span></div>
-                    <div className="flex justify-between text-sm"><span className="text-slate-500">Taxable income</span><span>${fmt(taxableIncome)}</span></div>
-                    <div className="flex justify-between text-sm font-bold pt-1 border-t border-slate-100"><span>Federal Tax Total</span><span className="text-red-600">${fmt(fedTax)}</span></div>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between bg-red-50 border border-red-200 rounded-xl px-5 py-4">
-                  <div>
-                    <p className="text-[10px] font-bold text-red-400 uppercase tracking-wider">Total Estimated Tax ({taxYear})</p>
-                    <p className="text-3xl font-bold text-red-700 mt-0.5">${fmt(totalEstTax)}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-[10px] font-bold text-red-400 uppercase tracking-wider">Per Quarter</p>
-                    <p className="text-2xl font-bold text-red-600">${fmt(qPayment)}</p>
-                  </div>
-                </div>
-              </Card>
-
-              {/* Quarterly schedule */}
-              <Card className="p-5 space-y-4">
-                <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2"><CalendarClock size={14} className="text-orange-500" />Quarterly Payment Schedule</h3>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {QUARTERLY.map((q, i) => {
-                    const isPast = new Date(q.due) < new Date();
-                    return (
-                      <div key={i} className={`rounded-xl border p-4 space-y-1.5 ${isPast ? "border-slate-200 bg-slate-50" : "border-orange-200 bg-orange-50"}`}>
-                        <div className="flex items-center justify-between">
-                          <span className={`text-xs font-bold uppercase tracking-wide ${isPast ? "text-slate-400" : "text-orange-600"}`}>{q.label}</span>
-                          {isPast && <span className="text-[10px] bg-slate-200 text-slate-500 px-2 py-0.5 rounded-full font-medium">Past</span>}
-                        </div>
-                        <p className="text-[11px] text-slate-500">{q.period}</p>
-                        <div className="flex items-center justify-between pt-1">
-                          <div>
-                            <p className="text-[10px] text-slate-400">IRS Due</p>
-                            <p className={`text-sm font-bold ${isPast ? "text-slate-500" : "text-orange-700"}`}>{q.due}</p>
-                          </div>
-                          <p className={`text-xl font-bold ${isPast ? "text-slate-400" : "text-orange-600"}`}>${fmt(qPayment)}</p>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-                <p className="text-[11px] text-slate-400 leading-relaxed">Pay via <strong>EFTPS</strong> (eftps.gov) or mail Form 1040-ES. Dates are standard IRS deadlines — verify at irs.gov if a date falls on a weekend or holiday. State estimated taxes are separate. This is not tax advice.</p>
-              </Card>
-            </div>
-          );
-        })()}
+        {/* ── CLIENTS ── */}
+        {activeTab === "clients" && (
+          <ClientBookTab
+            clients={clients}
+            setClients={setClients}
+            invoices={invoices}
+          />
+        )}
       </main>
     </div>
 
