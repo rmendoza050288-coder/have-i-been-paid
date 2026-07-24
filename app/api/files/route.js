@@ -1,8 +1,47 @@
 import { NextResponse } from "next/server";
 import fs from "fs";
+import os from "os";
 import path from "path";
 
-const FILES_DIR = path.join(process.cwd(), "offline_files", "Have I Been Paid_");
+// Stable, OS-level app-data directory — independent of wherever the app's
+// code happens to live on disk. Uploaded receipts/invoices must survive
+// "updating to a new version" (re-cloning/re-downloading the project, or
+// extracting a fresh build over the old folder). offline_files/ is
+// gitignored and never shipped with the app, so if we kept storing uploads
+// relative to process.cwd() (the project folder), replacing that folder
+// with a new version would silently lose everything a user had uploaded.
+function getAppDataDir() {
+  const home = os.homedir();
+  if (process.platform === "darwin") {
+    return path.join(home, "Library", "Application Support", "Have I Been Paid");
+  }
+  if (process.platform === "win32") {
+    return path.join(process.env.APPDATA || path.join(home, "AppData", "Roaming"), "Have I Been Paid");
+  }
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, ".config"), "Have I Been Paid");
+}
+
+const FILES_DIR = path.join(getAppDataDir(), "offline_files", "Have I Been Paid_");
+
+// One-time migration: the first time this stable location is used, pull in
+// any existing uploads from the legacy in-project offline_files folder so
+// nothing already saved gets lost. No-op once the stable dir has been set up
+// (e.g. the packaged Electron build, whose cwd is already the userData dir).
+function ensureFilesDir() {
+  if (fs.existsSync(FILES_DIR)) return;
+  fs.mkdirSync(path.dirname(FILES_DIR), { recursive: true });
+  const legacyDir = path.join(process.cwd(), "offline_files", "Have I Been Paid_");
+  if (fs.existsSync(legacyDir) && path.resolve(legacyDir) !== path.resolve(FILES_DIR)) {
+    try {
+      fs.cpSync(legacyDir, FILES_DIR, { recursive: true });
+      return;
+    } catch (err) {
+      console.error("[files] Failed to migrate legacy offline_files:", err);
+    }
+  }
+  fs.mkdirSync(FILES_DIR, { recursive: true });
+}
+ensureFilesDir();
 
 const MIME_TYPES = {
   ".pdf": "application/pdf",

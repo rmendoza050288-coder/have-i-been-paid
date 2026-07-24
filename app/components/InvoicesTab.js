@@ -518,17 +518,35 @@ export default function InvoicesTab({
                                 })()}
                               </div>
                             </div>
-                            <div className="p-3 bg-slate-50 border-t border-slate-100 flex gap-2">
-                              <Button variant="outline" className="flex-none" onClick={() => setPreviewItem(item)} title="Preview invoice">
-                                <Eye size={15} className="mr-1.5" /> View
-                              </Button>
-                              {item.generated && item.generatedData && (
-                                <Button variant="outline" className="flex-none text-blue-600 border-blue-200 hover:bg-blue-50" onClick={() => openEditInvoice(item)} title="Edit invoice">
-                                  <Pencil size={15} className="mr-1.5" />Edit
+                            <div className="p-3 bg-slate-50 border-t border-slate-100 flex flex-col gap-2">
+                              <div className="flex flex-wrap gap-2">
+                                <Button variant="outline" className="flex-1 sm:flex-none" onClick={() => setPreviewItem(item)} title="Preview invoice">
+                                  <Eye size={15} className="mr-1.5" /> View
                                 </Button>
-                              )}
+                                {item.generated && item.generatedData && (
+                                  <Button variant="outline" className="flex-1 sm:flex-none text-blue-600 border-blue-200 hover:bg-blue-50" onClick={() => openEditInvoice(item)} title="Edit invoice">
+                                    <Pencil size={15} className="mr-1.5" />Edit
+                                  </Button>
+                                )}
+                                {!item.paystub ? (
+                                  <div className="relative flex-1 sm:flex-none">
+                                    <input type="file" accept="image/*,.pdf"
+                                      onChange={e => { if (e.target.files[0]) handlePaystubUpload(item.id, e.target.files[0]); e.target.value = ""; }}
+                                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                      disabled={paystubUploading === item.id} />
+                                    <Button variant="outline" disabled={paystubUploading === item.id} className="w-full text-blue-600 border-blue-200 hover:bg-blue-50 whitespace-nowrap">
+                                      {paystubUploading === item.id ? <><Loader2 size={13} className="animate-spin mr-1.5" />Reading...</> : <><UploadCloud size={13} className="mr-1.5" />Paystub</>}
+                                    </Button>
+                                  </div>
+                                ) : (
+                                  <Button variant="outline" className="flex-1 sm:flex-none text-emerald-700 border-emerald-200 hover:bg-emerald-50"
+                                    onClick={() => setPreviewItem({ ...item, id: "paystub_" + item.id, fileName: item.paystub.fileName, fileId: item.paystub.fileId, fileType: item.paystub.fileType })}>
+                                    <CheckCircle size={13} className="mr-1.5" />Paystub
+                                  </Button>
+                                )}
+                              </div>
                               {effectiveStatus !== "Paid" ? (
-                                <Button variant="success" className="flex-1" onClick={() => {
+                                <Button variant="success" className="w-full" onClick={() => {
                                   setMarkPaidModal({ id: item.id, idx, amount: parseFloat(item.amount) || 0, existingPayments: item.payments || [] });
                                   setMarkPaidMode(null);
                                   setMarkPaidPartialAmt("");
@@ -536,27 +554,11 @@ export default function InvoicesTab({
                                   setMarkPaidMethod("");
                                 }}>Mark as Paid</Button>
                               ) : (
-                                <Button variant="outline" className="flex-1 text-emerald-600 border-emerald-200 hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-colors group" onClick={() => { const n = [...invoices]; n[idx] = { ...n[idx], status: "Unpaid", amountReceived: 0, payments: [] }; setInvoices(n); }} title="Click to mark as unpaid">
+                                <Button variant="outline" className="w-full text-emerald-600 border-emerald-200 hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-colors group" onClick={() => { const n = [...invoices]; n[idx] = { ...n[idx], status: "Unpaid", amountReceived: 0, payments: [] }; setInvoices(n); }} title="Click to mark as unpaid">
                                   <CheckCircle size={15} className="mr-1.5 group-hover:hidden" />
                                   <X size={15} className="mr-1.5 hidden group-hover:inline" />
                                   <span className="group-hover:hidden">Paid</span>
                                   <span className="hidden group-hover:inline">Mark Unpaid</span>
-                                </Button>
-                              )}
-                              {!item.paystub ? (
-                                <div className="relative flex-none">
-                                  <input type="file" accept="image/*,.pdf"
-                                    onChange={e => { if (e.target.files[0]) handlePaystubUpload(item.id, e.target.files[0]); e.target.value = ""; }}
-                                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                                    disabled={paystubUploading === item.id} />
-                                  <Button variant="outline" disabled={paystubUploading === item.id} className="text-blue-600 border-blue-200 hover:bg-blue-50 whitespace-nowrap">
-                                    {paystubUploading === item.id ? <><Loader2 size={13} className="animate-spin mr-1.5" />Reading...</> : <><UploadCloud size={13} className="mr-1.5" />Paystub</>}
-                                  </Button>
-                                </div>
-                              ) : (
-                                <Button variant="outline" className="flex-none text-emerald-700 border-emerald-200 hover:bg-emerald-50"
-                                  onClick={() => setPreviewItem({ ...item, id: "paystub_" + item.id, fileName: item.paystub.fileName, fileId: item.paystub.fileId, fileType: item.paystub.fileType })}>
-                                  <CheckCircle size={13} className="mr-1.5" />Paystub
                                 </Button>
                               )}
                             </div>

@@ -44,6 +44,7 @@ import {
   CreditCard,
   Receipt,
   Users,
+  Palette,
 } from "lucide-react";
 import { Card, Button, Input } from "./components/ui";
 import CalendarTab from "./components/CalendarTab";
@@ -54,6 +55,7 @@ import PurchasesTab from "./components/PurchasesTab";
 import TimecardsTab from "./components/TimecardsTab";
 import InvoicesTab from "./components/InvoicesTab";
 import ClientBookTab from "./components/ClientBookTab";
+import InvoiceDesignTab from "./components/InvoiceDesignTab";
 import {
   parseInvoiceText,
   parseTimecardText,
@@ -84,6 +86,8 @@ import {
   dayRateToHourly,
   FOLDER_NAME,
   SIGNATURE_FONTS,
+  buildInvoiceHtml,
+  DEFAULT_INVOICE_THEME,
 } from "./lib/utils";
 
 export default function App() {
@@ -165,6 +169,8 @@ export default function App() {
   // Local blob URL cache: itemId → { url, type }
   const blobCache = useRef(new Map());
   const [hydrated, setHydrated] = useState(false);
+  const autosaveTimer = useRef(null);
+  const [invoiceTheme, setInvoiceTheme] = useState(DEFAULT_INVOICE_THEME);
   const reportIframeRef = useRef(null);
   const reportHtmlRef = useRef(null);
   const [showReportOverlay, setShowReportOverlay] = useState(false);
@@ -174,6 +180,22 @@ export default function App() {
     const saved = localStorage.getItem("hibp_dark_mode");
     if (saved === "true") { setDarkMode(true); document.documentElement.classList.add("dark"); }
   }, []);
+  const [invoiceThemeLoaded, setInvoiceThemeLoaded] = useState(false);
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("hibp_invoice_theme");
+      if (saved) setInvoiceTheme(prev => ({ ...prev, ...JSON.parse(saved) }));
+    } catch {}
+    // Only allow the save-effect below to run after this load has been
+    // applied — otherwise it fires on mount with the still-default state
+    // (before the async setState above lands) and clobbers whatever was
+    // previously saved, resetting the invoice theme back to default.
+    setInvoiceThemeLoaded(true);
+  }, []);
+  useEffect(() => {
+    if (!invoiceThemeLoaded) return;
+    try { localStorage.setItem("hibp_invoice_theme", JSON.stringify(invoiceTheme)); } catch {}
+  }, [invoiceThemeLoaded, invoiceTheme]);
   const toggleDarkMode = () => {
     const next = !darkMode;
     setDarkMode(next);
@@ -207,46 +229,90 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [yearFolderIds, setYearFolderIds] = useState({});
 
+  // A snapshot counts as "empty" when every list is empty — used to decide
+  // whether to fall back to the server-side autosave safety net below.
+  const isEmptyDataSnapshot = (obj) => {
+    if (!obj) return true;
+    const arrayKeys = ["invoices", "timecards", "jobs", "purchases", "classifications",
+      "mileageLogs", "vehicleExpenses", "vehicles", "gasLogs", "kitPackages", "clients",
+      "invoiceTemplates", "holdDays"];
+    const allArraysEmpty = arrayKeys.every(k => !Array.isArray(obj[k]) || obj[k].length === 0);
+    const notesEmpty = !obj.calendarNotes || Object.keys(obj.calendarNotes).length === 0;
+    return allArraysEmpty && notesEmpty;
+  };
+
   // ── LOAD FROM LOCALSTORAGE ON MOUNT ─────────────────────────────────────────
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem("hibp_data");
-      if (stored) {
-        const d = JSON.parse(stored);
-        if (Array.isArray(d.invoices)) setInvoices(d.invoices);
-        if (Array.isArray(d.timecards)) setTimecards(d.timecards);
-        if (Array.isArray(d.jobs)) setJobs(d.jobs);
-        if (Array.isArray(d.purchases)) setPurchases(d.purchases);
-        if (Array.isArray(d.classifications)) setClassifications(d.classifications);
-        if (Array.isArray(d.mileageLogs)) setMileageLogs(d.mileageLogs);
-        if (Array.isArray(d.vehicleExpenses)) setVehicleExpenses(d.vehicleExpenses);
-        if (Array.isArray(d.vehicles)) setVehicles(d.vehicles);
-        if (Array.isArray(d.gasLogs)) setGasLogs(d.gasLogs);
-        if (Array.isArray(d.kitPackages)) setKitPackages(d.kitPackages);
-        if (Array.isArray(d.clients)) setClients(d.clients);
-        if (Array.isArray(d.invoiceTemplates)) setInvoiceTemplates(d.invoiceTemplates);
-        if (Array.isArray(d.holdDays)) setHoldDays(d.holdDays);
-        if (d.calendarNotes && typeof d.calendarNotes === "object" && !Array.isArray(d.calendarNotes)) setCalendarNotes(d.calendarNotes);
-      }
-      const ls = localStorage.getItem("hibp_last_synced");
-      if (ls) setLastSynced(ls);
-      const cf = localStorage.getItem("hibp_custom_folder_id");
-      if (cf) { setCustomFolderInput(cf); setSavedCustomFolderId(cf); }
-    } catch {}
-    // setHydrated(true) triggers a re-render where state is fully loaded
-    // auto-save will only fire after that re-render, never with empty initial state
-    setHydrated(true);
-    // Check if service account Drive is configured
-    fetch("/api/drive?action=ping")
-      .then(r => r.json())
-      .then(data => {
-        if (data.ok) {
-          setDriveConnected(true);
-          setDriveEmail(data.email || "");
-          setDriveCheckStatus("ok");
-          initDrive().catch(() => {});
+    let cancelled = false;
+    (async () => {
+      try {
+        const stored = localStorage.getItem("hibp_data");
+        let d = null;
+        if (stored) {
+          try { d = JSON.parse(stored); } catch {}
         }
-      }).catch(() => {});
+        // Safety net: browser localStorage writes are committed to disk by
+        // the browser itself on an internal, asynchronous timer. If the
+        // browser is fully quit very shortly after a write, that write can
+        // be lost even though it appeared to succeed in the live session.
+        // This can happen even when localStorage is NOT fully empty — e.g.
+        // every field except the single most recent invoice made it to disk.
+        // So we always fetch the server-side autosave copy (written
+        // synchronously, not subject to that timing) and compare freshness
+        // via `updatedAt`, using whichever snapshot is actually newer/more
+        // complete rather than only falling back when local looks empty.
+        try {
+          const res = await fetch("/api/autosave");
+          const json = await res.json();
+          const serverData = json?.data;
+          if (serverData && !isEmptyDataSnapshot(serverData)) {
+            if (isEmptyDataSnapshot(d)) {
+              d = serverData;
+            } else {
+              const localTime = d?.updatedAt || 0;
+              const serverTime = serverData?.updatedAt || 0;
+              if (serverTime > localTime) d = serverData;
+            }
+          }
+        } catch {}
+        if (d) {
+          if (Array.isArray(d.invoices)) setInvoices(d.invoices);
+          if (Array.isArray(d.timecards)) setTimecards(d.timecards);
+          if (Array.isArray(d.jobs)) setJobs(d.jobs);
+          if (Array.isArray(d.purchases)) setPurchases(d.purchases);
+          if (Array.isArray(d.classifications)) setClassifications(d.classifications);
+          if (Array.isArray(d.mileageLogs)) setMileageLogs(d.mileageLogs);
+          if (Array.isArray(d.vehicleExpenses)) setVehicleExpenses(d.vehicleExpenses);
+          if (Array.isArray(d.vehicles)) setVehicles(d.vehicles);
+          if (Array.isArray(d.gasLogs)) setGasLogs(d.gasLogs);
+          if (Array.isArray(d.kitPackages)) setKitPackages(d.kitPackages);
+          if (Array.isArray(d.clients)) setClients(d.clients);
+          if (Array.isArray(d.invoiceTemplates)) setInvoiceTemplates(d.invoiceTemplates);
+          if (Array.isArray(d.holdDays)) setHoldDays(d.holdDays);
+          if (d.calendarNotes && typeof d.calendarNotes === "object" && !Array.isArray(d.calendarNotes)) setCalendarNotes(d.calendarNotes);
+        }
+        const ls = localStorage.getItem("hibp_last_synced");
+        if (ls) setLastSynced(ls);
+        const cf = localStorage.getItem("hibp_custom_folder_id");
+        if (cf) { setCustomFolderInput(cf); setSavedCustomFolderId(cf); }
+      } catch {}
+      if (cancelled) return;
+      // setHydrated(true) triggers a re-render where state is fully loaded
+      // auto-save will only fire after that re-render, never with empty initial state
+      setHydrated(true);
+      // Check if service account Drive is configured
+      fetch("/api/drive?action=ping")
+        .then(r => r.json())
+        .then(data => {
+          if (data.ok) {
+            setDriveConnected(true);
+            setDriveEmail(data.email || "");
+            setDriveCheckStatus("ok");
+            initDrive().catch(() => {});
+          }
+        }).catch(() => {});
+    })();
+    return () => { cancelled = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Re-usable ping → initDrive sequence (used by modal Verify button + Use Folder)
@@ -378,8 +444,20 @@ export default function App() {
   // Depends on `hydrated` so it only fires after the load effect's setState calls have rendered.
   useEffect(() => {
     if (!hydrated) return;
-    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients, holdDays, calendarNotes, invoiceTemplates };
+    const data = { invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients, holdDays, calendarNotes, invoiceTemplates, updatedAt: Date.now() };
     try { localStorage.setItem("hibp_data", JSON.stringify(data)); } catch {}
+    // Mirror to a server-side autosave file too (debounced). That write is
+    // committed to disk synchronously and immediately, unlike localStorage
+    // — which the browser can lose if it's fully quit within a moment of
+    // the write, before its own internal commit timer flushes it.
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = setTimeout(() => {
+      fetch("/api/autosave", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      }).catch(() => {});
+    }, 150);
   }, [hydrated, invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients, holdDays, calendarNotes, invoiceTemplates]);
 
   // ── EXPORT / RELINK ──────────────────────────────────────────────────────────
@@ -1401,7 +1479,13 @@ ${printStyle}</style></head><body>
     setShowInvoiceGenerator(true);
   };
 
-  const duplicateInvoice = (source) => {
+  const duplicateInvoice = (item) => {
+    // `item` is the top-level invoice list entry — the actual generator form
+    // fields (sender info, client address, line items, etc.) live in
+    // item.generatedData. Duplicating from `item` directly (instead of
+    // item.generatedData) was dropping senderAddress/senderName/clientAddress
+    // and every other generator-only field, forcing the user to re-enter them.
+    const source = item.generatedData || item;
     const today = new Date().toISOString().split("T")[0];
     const dueD = new Date(); dueD.setDate(dueD.getDate() + 30);
     const y = new Date().getFullYear(), mo = String(new Date().getMonth() + 1).padStart(2, "0"), dy = String(new Date().getDate()).padStart(2, "0");
@@ -1475,136 +1559,10 @@ ${printStyle}</style></head><body>
   };
 
   const downloadInvoicePDF = async (form, saveEntry = false) => {
-    const fmt = n => (parseFloat(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2 });
-    const fmtDate = s => { if (!s) return ""; const d = new Date(s + "T12:00"); return isNaN(d) ? s : d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }); };
     const subtotal = form.lineItems.reduce((a, li) => a + (parseFloat(li.amount) || 0), 0);
     const taxAmt = subtotal * ((parseFloat(form.taxRate) || 0) / 100);
     const total = subtotal + taxAmt;
-    const rows = form.lineItems.map(li => `
-      <tr>
-        <td style="padding:9px 12px;border-bottom:1px solid #daf2f7;">${li.description || ""}</td>
-        <td style="padding:9px 12px;text-align:center;border-bottom:1px solid #daf2f7;">${li.qty || ""}</td>
-        <td style="padding:9px 12px;text-align:right;border-bottom:1px solid #daf2f7;">${li.rate ? "$" + fmt(li.rate) : ""}</td>
-        <td style="padding:9px 12px;text-align:right;border-bottom:1px solid #daf2f7;font-weight:600;">${(parseFloat(li.amount) || 0) > 0 ? "$" + fmt(li.amount) : ""}</td>
-      </tr>`).join("");
-    const blankRows = Array.from({ length: Math.max(0, 7 - form.lineItems.length) }, () => `
-      <tr>
-        <td style="padding:9px 12px;border-bottom:1px solid #daf2f7;">&nbsp;</td>
-        <td style="padding:9px 12px;border-bottom:1px solid #daf2f7;"></td>
-        <td style="padding:9px 12px;border-bottom:1px solid #daf2f7;"></td>
-        <td style="padding:9px 12px;border-bottom:1px solid #daf2f7;"></td>
-      </tr>`).join("");
-
-    const html = `<!DOCTYPE html>
-<html><head>
-  <meta charset="utf-8"/>
-  <title>Invoice ${form.invoiceNumber || ""}</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Century Gothic', 'Trebuchet MS', 'Gill Sans', Arial, sans-serif; font-size: 11px; color: #111; background: #fff; padding: 36px 40px; }
-    .top-bar { background: #111; height: 8px; border-radius: 2px 2px 0 0; }
-    .header { display: grid; grid-template-columns: 1fr auto; border: 1px solid #9ee7f5; border-top: none; }
-    .sender-block { background: #cff4fc; padding: 16px 18px; }
-    .invoice-block { padding: 16px 18px; text-align: right; display: flex; flex-direction: column; justify-content: center; align-items: flex-end; border-left: 1px solid #9ee7f5; min-width: 160px; background: #fff; }
-    .invoice-title { font-size: 24px; font-weight: bold; letter-spacing: 3px; }
-    .invoice-num { font-size: 10px; color: #444; margin-top: 3px; font-family: monospace; }
-    .lbl { font-size: 8.5px; color: #555; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 1px; }
-    .val { font-size: 11px; color: #111; line-height: 1.4; }
-    .sec-hdr { background: #cff4fc; border: 1px solid #9ee7f5; border-top: none; display: grid; grid-template-columns: 1fr 1fr; }
-    .sec-hdr-cell { padding: 4px 12px; font-size: 8.5px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }
-    .sec-hdr-cell:first-child { border-right: 1px solid #9ee7f5; }
-    .cj-grid { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid #9ee7f5; border-top: none; }
-    .cj-col { padding: 10px 12px; }
-    .cj-col:first-child { border-right: 1px solid #9ee7f5; }
-    table.items { width: 100%; border-collapse: collapse; border: 1px solid #9ee7f5; border-top: none; }
-    table.items thead th { background: #cff4fc; padding: 6px 12px; font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #9ee7f5; font-weight: bold; }
-    table.items thead th:not(:first-child) { text-align: right; }
-    table.items thead th:nth-child(2) { text-align: center; width: 80px; }
-    table.items thead th:nth-child(3) { width: 110px; }
-    table.items thead th:nth-child(4) { width: 110px; }
-    .totals-grid { display: grid; grid-template-columns: 1fr 220px; border: 1px solid #9ee7f5; border-top: none; }
-    .notes-cell { padding: 10px 12px; font-size: 10px; color: #555; border-right: 1px solid #9ee7f5; }
-    .tr-row { display: flex; justify-content: space-between; padding: 5px 12px; border-bottom: 1px solid #e8f9fc; font-size: 11px; }
-    .tr-row.grand { background: #cff4fc; font-weight: bold; font-size: 13px; border-bottom: none; }
-    .payment-block { border: 1px solid #9ee7f5; border-top: none; }
-    .payment-hdr { background: #cff4fc; padding: 4px 12px; font-size: 8.5px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #9ee7f5; }
-    .payment-grid { display: grid; gap: 0; padding: 0; }
-    .pm-row { display: flex; gap: 4px; margin-bottom: 2px; }
-    .pm-row .lbl { width: 52px; shrink: 0; }
-    .footer-bar { border: 1px solid #9ee7f5; border-top: none; text-align: center; padding: 7px; font-size: 10px; color: #666; background: #f8fefe; }
-    @media print { body { padding: 10px; } }
-  </style>
-</head><body>
-<div class="top-bar"></div>
-<div class="header">
-  <div class="sender-block">
-    ${form.logoDataUrl ? `<img src="${form.logoDataUrl}" style="max-height:60px;max-width:180px;object-fit:contain;margin-bottom:10px;display:block;" alt="" />` : ""}
-    <div class="lbl">Name</div><div class="val" style="font-weight:600;">${form.senderName || "&nbsp;"}</div>
-    ${(form.senderAddress || form.senderCity) ? `<div class="lbl" style="margin-top:6px;">Address</div>${form.senderAddress ? `<div class="val">${form.senderAddress}</div>` : ""}${(form.senderCity || form.senderState || form.senderZip) ? `<div class="val">${[form.senderCity, form.senderState, form.senderZip].filter(Boolean).join(", ")}</div>` : ""}` : ""}
-    <div style="display:flex;gap:24px;margin-top:6px;">
-      ${form.senderPhone ? `<div><div class="lbl">Phone</div><div class="val">${form.senderPhone}</div></div>` : ""}
-      ${form.senderEmail ? `<div><div class="lbl">Email</div><div class="val">${form.senderEmail}</div></div>` : ""}
-    </div>
-  </div>
-  <div class="invoice-block">
-    <div class="invoice-title">INVOICE</div>
-    ${form.invoiceNumber ? `<div class="invoice-num">#${form.invoiceNumber}</div>` : ""}
-  </div>
-</div>
-<div class="sec-hdr">
-  <div class="sec-hdr-cell">Customer</div>
-  <div class="sec-hdr-cell">Job</div>
-</div>
-<div class="cj-grid">
-  <div class="cj-col">
-    <div class="lbl">Name</div><div class="val" style="font-weight:600;">${form.clientName || "&nbsp;"}</div>
-    ${(form.clientAddress || form.clientCity) ? `<div class="lbl" style="margin-top:5px;">Address</div>${form.clientAddress ? `<div class="val">${form.clientAddress}</div>` : ""}${(form.clientCity || form.clientState || form.clientZip) ? `<div class="val">${[form.clientCity, form.clientState, form.clientZip].filter(Boolean).join(", ")}</div>` : ""}` : ""}
-  </div>
-  <div class="cj-col">
-    <div class="lbl">Date Submitted</div><div class="val">${fmtDate(form.invoiceDate)}</div>
-    <div class="lbl" style="margin-top:5px;">Due Date</div><div class="val" style="font-weight:600;">${fmtDate(form.dueDate)}</div>
-    ${form.paymentTerms && form.paymentTerms !== "Custom" ? `<div class="lbl" style="margin-top:5px;">Payment Terms</div><div class="val">${form.paymentTerms}</div>` : ""}
-    ${form.jobName ? `<div class="lbl" style="margin-top:5px;">Job / Show</div><div class="val">${form.jobName}</div>` : ""}
-  </div>
-</div>
-<table class="items">
-  <thead>
-    <tr>
-      <th style="text-align:left;">Description</th>
-      <th>Qty / Hrs</th>
-      <th>Rate</th>
-      <th>Amount</th>
-    </tr>
-  </thead>
-  <tbody>${rows}${blankRows}</tbody>
-</table>
-<div class="totals-grid">
-  <div class="notes-cell">${form.notes ? `<strong>Notes:</strong><br/>${form.notes}` : `<span style="color:#ccc;">Notes / Comments</span>`}</div>
-  <div>
-    <div class="tr-row"><span>Subtotal</span><span>$${fmt(subtotal)}</span></div>
-    ${taxAmt > 0 ? `<div class="tr-row"><span>Tax (${form.taxRate}%)</span><span>$${fmt(taxAmt)}</span></div>` : ""}
-    ${(form.lateFeeType && form.lateFeeType !== "none" && parseFloat(form.lateFeeRate) > 0) ? `<div class="tr-row" style="color:#b45309;"><span>${form.lateFeeType === "flat" ? `Late Fee (flat $${fmt(form.lateFeeRate)})` : `Late Fee (${form.lateFeeRate}%/day)`}</span><span style="font-style:italic;">applied if overdue</span></div>` : ""}
-    <div class="tr-row grand"><span>TOTAL</span><span>$${fmt(total)}</span></div>
-  </div>
-</div>
-<div class="payment-block">
-  <div class="payment-hdr">How to Pay</div>
-  <div class="payment-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));">
-    ${(() => {
-      const methods = Array.isArray(form.paymentMethods) ? form.paymentMethods : (form.paymentMethod ? [form.paymentMethod] : ["ACH"]);
-      return methods.map(m => {
-        if (m === "ACH") return `<div style="padding:8px 12px;"><div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">ACH / Wire Transfer</div><div class="pm-row"><div class="lbl">Bank</div><div class="val">${form.bankName || "\u2014"}</div></div><div class="pm-row"><div class="lbl">Routing</div><div class="val" style="font-family:monospace;">${form.routingNumber || "\u2014"}</div></div><div class="pm-row"><div class="lbl">Account</div><div class="val" style="font-family:monospace;">${form.accountNumber || "\u2014"}</div></div></div>`;
-        if (m === "Check") return `<div style="padding:8px 12px;"><div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">Check</div><div class="pm-row"><div class="lbl">Payable To</div><div class="val" style="font-weight:600;">${form.checkPayableTo || "\u2014"}</div></div></div>`;
-        if (m === "PayPal") return `<div style="padding:8px 12px;"><div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">PayPal</div><div class="pm-row"><div class="lbl">Email / Username</div><div class="val">${form.paypalHandle || "\u2014"}</div></div></div>`;
-        if (m === "Zelle") return `<div style="padding:8px 12px;"><div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">Zelle</div><div class="pm-row"><div class="lbl">Phone / Email</div><div class="val">${form.zelleHandle || "\u2014"}</div></div></div>`;
-        if (m === "Venmo") return `<div style="padding:8px 12px;"><div class="lbl" style="margin-bottom:4px;font-size:8px;font-weight:bold;color:#0e7490;">Venmo</div><div class="pm-row"><div class="lbl">Username</div><div class="val">${form.venmoHandle || "\u2014"}</div></div></div>`;
-        return "";
-      }).join('<div style="border-left:1px solid #9ee7f5;"></div>');
-    })()}
-  </div>
-</div>
-<div class="footer-bar">Thank you for your business!</div>
-</body></html>`;
+    const html = buildInvoiceHtml(form, invoiceTheme);
 
     // Persist sender profile for next time
     try { localStorage.setItem("hibp_sender_profile", JSON.stringify({ senderName: form.senderName, senderAddress: form.senderAddress, senderCity: form.senderCity, senderState: form.senderState, senderZip: form.senderZip, senderPhone: form.senderPhone, senderEmail: form.senderEmail, paymentMethods: form.paymentMethods, paymentMethod: (form.paymentMethods || [])[0] || "ACH", bankName: form.bankName, routingNumber: form.routingNumber, accountNumber: form.accountNumber, paypalHandle: form.paypalHandle, zelleHandle: form.zelleHandle, venmoHandle: form.venmoHandle, checkPayableTo: form.checkPayableTo, logoDataUrl: form.logoDataUrl || "" })); } catch {}
@@ -1624,9 +1582,10 @@ ${printStyle}</style></head><body>
         if (res.ok) savedFileName = htmlFileName;
       } catch (err) { console.warn("Invoice file save error:", err.message); }
 
+      let updatedInvoices;
       if (editingInvoiceId) {
         // Update existing invoice record, preserve payments/status
-        setInvoices(prev => prev.map(inv => inv.id === editingInvoiceId ? {
+        updatedInvoices = invoices.map(inv => inv.id === editingInvoiceId ? {
           ...inv,
           company: form.clientName || "",
           amount: total,
@@ -1641,10 +1600,11 @@ ${printStyle}</style></head><body>
           fileType: savedFileName ? "text/html" : inv.fileType,
           generatedData: form,
           timestamp: Date.now(),
-        } : inv));
+        } : inv);
+        setInvoices(updatedInvoices);
         setEditingInvoiceId(null);
       } else {
-        setInvoices(prev => [{
+        updatedInvoices = [{
           id: invId, fileId: null, fileName: savedFileName, fileType: savedFileName ? "text/html" : null,
           company: form.clientName || "", amount: total, date: form.invoiceDate,
           invoiceNumber: form.invoiceNumber || "", status: "Unpaid",
@@ -1654,16 +1614,34 @@ ${printStyle}</style></head><body>
           lateFeeRate: parseFloat(form.lateFeeRate) || 0,
           amountReceived: 0,
           generated: true, generatedData: form, timestamp: Date.now(),
-        }, ...prev]);
+        }, ...invoices];
+        setInvoices(updatedInvoices);
         if (form.jobId) setExpandedJobs(prev => { const n = new Set(prev); n.add(form.jobId); return n; });
       }
+
+      // Persist this save immediately and durably — don't rely solely on the
+      // debounced background auto-save effect. localStorage writes are
+      // committed by the browser on its own internal timer, and any
+      // in-flight network request gets cancelled if the tab/browser closes
+      // before it completes. Awaiting this here means "Save & Download"
+      // only returns once the invoice is actually durable, so a user who
+      // closes the browser right after saving doesn't lose it.
+      const snapshot = { invoices: updatedInvoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients, holdDays, calendarNotes, invoiceTemplates, updatedAt: Date.now() };
+      try { localStorage.setItem("hibp_data", JSON.stringify(snapshot)); } catch {}
+      try {
+        await fetch("/api/autosave", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(snapshot),
+        });
+      } catch {}
     }
 
     const w = window.open("", "_blank");
     if (!w) { alert("Please allow pop-ups for this site to print the invoice."); return; }
     w.document.write(html);
     w.document.close();
-    setTimeout(() => w.print(), 400);
+    setTimeout(() => { try { w.print(); } catch {} }, 400);
   };
   // ── MILEAGE TAX REPORT ───────────────────────────────────────────────────────
   const generateMileageReport = () => {
@@ -3815,7 +3793,7 @@ ${printStyle}</style></head><body>
         )}
 
         {/* Year selector — hidden on Kit tab */}
-        <div className={`flex items-center gap-2 flex-wrap ${activeTab === "kit" || activeTab === "calendar" || activeTab === "tax" || activeTab === "clients" ? "hidden" : ""}`}>
+        <div className={`flex items-center gap-2 flex-wrap ${activeTab === "kit" || activeTab === "calendar" || activeTab === "tax" || activeTab === "clients" || activeTab === "design" ? "hidden" : ""}`}>
           <span className="text-xs font-bold text-slate-400 uppercase tracking-wider mr-1">Year</span>
           {allYears.map(yr => (
             <button key={yr} onClick={() => setSelectedYear(yr)}
@@ -3855,6 +3833,9 @@ ${printStyle}</style></head><body>
             </button>
             <button onClick={() => { setActiveTab("clients"); setSearchQuery(""); }} className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "clients" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
               <Users size={14} className="inline mr-1.5 -mt-0.5" />Clients
+            </button>
+            <button onClick={() => { setActiveTab("design"); setSearchQuery(""); }} className={`px-5 py-2 rounded-lg text-sm font-semibold transition-all ${activeTab === "design" ? "bg-white shadow text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>
+              <Palette size={14} className="inline mr-1.5 -mt-0.5" />Design
             </button>
           </div>
           <div className="relative flex-1 min-w-[200px] max-w-xs">
@@ -4137,6 +4118,14 @@ ${printStyle}</style></head><body>
             clients={clients}
             setClients={setClients}
             invoices={invoices}
+          />
+        )}
+
+        {/* ── INVOICE DESIGN ── */}
+        {activeTab === "design" && (
+          <InvoiceDesignTab
+            theme={invoiceTheme}
+            setTheme={setInvoiceTheme}
           />
         )}
       </main>

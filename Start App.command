@@ -10,9 +10,29 @@ export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 
 # Kill any leftover Next.js processes so we always get port 3000
+# (Your invoices/timecards/etc. live in the browser's localStorage, which is
+# scoped per-origin — localhost:3000 and localhost:3001 are DIFFERENT origins
+# with separate storage. If port 3000 isn't fully free before we start the
+# new server, Next.js silently falls back to 3001+, and the app looks like
+# it "lost" all your data even though it's still safely sitting on the old
+# port's origin. So we actively wait for port 3000 to be free instead of
+# guessing with a fixed sleep.)
 echo "Stopping any previously running instances..."
 pkill -f "next dev" 2>/dev/null
-sleep 1
+
+echo "Waiting for port 3000 to be free..."
+for i in $(seq 1 15); do
+  if ! lsof -i :3000 -sTCP:LISTEN >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+# If something is still stubbornly holding port 3000 after ~15s, force it.
+if lsof -i :3000 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "Port 3000 still in use — force killing leftover process..."
+  lsof -ti :3000 -sTCP:LISTEN | xargs kill -9 2>/dev/null
+  sleep 1
+fi
 
 # Start Next.js and pipe output through tee so we can watch it live
 # and also capture it to detect the actual port
