@@ -41,6 +41,8 @@ function ensureOfflineFiles() {
 // ── Server management ────────────────────────────────────────────────────────
 
 let nextProcess = null;
+let serverExited = false;
+const SERVER_PORT = 3000;
 
 function startNextServer() {
   const standaloneDir = getResourcePath("app");
@@ -55,7 +57,7 @@ function startNextServer() {
     ...process.env,
     // ELECTRON_RUN_AS_NODE makes the Electron binary behave like Node.js
     ELECTRON_RUN_AS_NODE: "1",
-    PORT: "3000",
+    PORT: String(SERVER_PORT),
     HOSTNAME: "127.0.0.1",
     NODE_ENV: "production",
   };
@@ -78,21 +80,42 @@ function startNextServer() {
   nextProcess.stdout.on("data", (d) => console.log("[Next]", d.toString().trim()));
   nextProcess.stderr.on("data", (d) => console.error("[Next]", d.toString().trim()));
   nextProcess.on("error", (err) => console.error("[Next] Process error:", err));
-  nextProcess.on("exit", (code) => console.log("[Next] Exited with code:", code));
+  nextProcess.on("exit", (code) => {
+    console.log("[Next] Exited with code:", code);
+    serverExited = true;
+    nextProcess = null;
+  });
 }
 
-/** Poll localhost:3000 until it responds or we give up. */
-function waitForServer(port, maxAttempts = 30) {
+/** Resolve true if something already answers HTTP on the port. */
+function isPortInUse(port) {
+  return new Promise((resolve) => {
+    const req = http.get(`http://127.0.0.1:${port}`, (res) => {
+      res.resume();
+      resolve(true);
+    });
+    req.setTimeout(1000, () => req.destroy());
+    req.on("error", () => resolve(false));
+  });
+}
+
+/** Poll the port until it responds, the server dies, or we give up (~30s). */
+function waitForServer(port, maxAttempts = 120) {
   return new Promise((resolve, reject) => {
     let attempts = 0;
+    const retry = () => setTimeout(check, 250);
     const check = () => {
+      if (serverExited) return reject(new Error("Server exited during startup"));
       if (attempts >= maxAttempts) {
         return reject(new Error("Server did not start in time"));
       }
       attempts++;
-      const req = http.get(`http://127.0.0.1:${port}`, () => resolve());
-      req.on("error", () => setTimeout(check, 1000));
-      req.end();
+      const req = http.get(`http://127.0.0.1:${port}`, (res) => {
+        res.resume();
+        resolve();
+      });
+      req.setTimeout(2000, () => req.destroy());
+      req.on("error", retry);
     };
     check();
   });
@@ -199,7 +222,20 @@ function createWindow() {
   return mainWindow;
 }
 
+// Two instances would fight over the same port and data directory.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
 app.whenReady().then(async () => {
+  if (!app.hasSingleInstanceLock()) return;
   ensureOfflineFiles();
 
   const win = createWindow();
@@ -240,11 +276,24 @@ app.whenReady().then(async () => {
     }
   }
 
+  // Data is stored per-origin, so the port must stay fixed. If something else
+  // already owns it (e.g. the browser version), starting would silently show
+  // that server instead of ours.
+  if (await isPortInUse(SERVER_PORT)) {
+    dialog.showErrorBox(
+      "Port Already in Use",
+      `Another program is using port ${SERVER_PORT} (possibly the browser version of this app). ` +
+        "Quit it and reopen Have I Been Paid?."
+    );
+    app.quit();
+    return;
+  }
+
   startNextServer();
 
   try {
-    await waitForServer(3000);
-    win.loadURL("http://127.0.0.1:3000");
+    await waitForServer(SERVER_PORT);
+    win.loadURL(`http://127.0.0.1:${SERVER_PORT}`);
   } catch {
     dialog.showErrorBox(
       "Startup Failed",
@@ -256,9 +305,9 @@ app.whenReady().then(async () => {
 
 app.on("activate", () => {
   // macOS: re-create the window when clicking the dock icon with no windows open
-  if (!mainWindow) {
+  if (!mainWindow && app.isReady() && nextProcess) {
     const win = createWindow();
-    win.loadURL("http://127.0.0.1:3000");
+    win.loadURL(`http://127.0.0.1:${SERVER_PORT}`);
   }
 });
 
