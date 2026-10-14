@@ -36,16 +36,13 @@
         "to": "app",
         "filter": [
           "**/*",
-          "!node_modules/.cache/**"
+          "!node_modules/.cache/**",
+          "!offline_files/**"
         ]
       },
       {
         "from": ".next/static",
         "to": "app/.next/static"
-      },
-      {
-        "from": "offline_files",
-        "to": "offline_files"
       }
     ],
     "mac": {
