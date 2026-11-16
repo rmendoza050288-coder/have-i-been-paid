@@ -73,7 +73,7 @@ export default function ClientBookTab({ clients, setClients, invoices = [] }) {
   };
   const startEdit = (c) => {
     setEditingId(c.id);
-    setEditForm({ name: c.name||"", address: c.address||"", city: c.city||"", state: c.state||"", zip: c.zip||"", email: c.email||"", phone: c.phone||"" });
+    setEditForm({ name: c.name||"", address: c.address||"", city: c.city||"", state: c.state||"", zip: c.zip||"", email: c.email||"", phone: c.phone||"", w9Sent: !!c.w9Sent, w9SentDate: c.w9SentDate||"", form1099Received: !!c.form1099Received });
   };
   const saveEdit = (id) => {
     setClients(prev => prev.map(c => c.id === id ? { ...c, ...editForm } : c));
@@ -230,6 +230,17 @@ export default function ClientBookTab({ clients, setClients, invoices = [] }) {
                       <Input value={editForm.email} onChange={e=>setEditForm(p=>({...p,email:e.target.value}))} placeholder="Billing email" />
                       <Input value={editForm.phone} onChange={e=>setEditForm(p=>({...p,phone:e.target.value}))} placeholder="Billing phone" />
                     </div>
+                    <div className="grid grid-cols-2 gap-2 items-center text-xs text-slate-600">
+                      <label className="flex items-center gap-2">
+                        <input type="checkbox" checked={editForm.w9Sent} onChange={e=>setEditForm(p=>({...p,w9Sent:e.target.checked}))} />
+                        W-9 sent to client
+                      </label>
+                      <Input type="date" value={editForm.w9SentDate} onChange={e=>setEditForm(p=>({...p,w9SentDate:e.target.value}))} disabled={!editForm.w9Sent} />
+                      <label className="flex items-center gap-2 col-span-2">
+                        <input type="checkbox" checked={editForm.form1099Received} onChange={e=>setEditForm(p=>({...p,form1099Received:e.target.checked}))} />
+                        1099 received from client
+                      </label>
+                    </div>
                     <div className="flex gap-2 justify-end">
                       <Button variant="outline" onClick={() => setEditingId(null)} className="gap-1"><X size={13} />Cancel</Button>
                       <Button onClick={() => saveEdit(c.id)} className="gap-1"><Check size={13} />Save</Button>
@@ -248,6 +259,12 @@ export default function ClientBookTab({ clients, setClients, invoices = [] }) {
                         )}
                         {lastWorked && (
                           <span className="text-[11px] text-slate-400">Last: {fmtDate(lastWorked)}</span>
+                        )}
+                        <span className={`text-[10px] font-semibold rounded-full px-2 py-0.5 border ${c.w9Sent ? "text-emerald-700 bg-emerald-50 border-emerald-200" : "text-amber-700 bg-amber-50 border-amber-200"}`}>
+                          {c.w9Sent ? `W-9 sent${c.w9SentDate ? " " + fmtDate(c.w9SentDate) : ""}` : "W-9 not sent"}
+                        </span>
+                        {c.form1099Received && (
+                          <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">1099 received</span>
                         )}
                       </div>
                       <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-slate-500">

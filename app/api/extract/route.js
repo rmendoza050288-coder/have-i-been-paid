@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 
 export async function POST(request) {
-  const { image } = await request.json();
+  const { image, mode } = await request.json();
+  const isReceipt = mode === "receipt";
+  const prompt = isReceipt
+    ? 'Extract receipt data from this image. Return ONLY a JSON object with these keys: vendor (store or business name, string), amount (total paid, number, no currency symbols), date (YYYY-MM-DD). If a field is not found, use an empty string or 0.'
+    : 'Extract invoice data from this image. Return ONLY a JSON object with these keys: company (string), amount (number, no currency symbols), date (YYYY-MM-DD), invoiceNumber (string). If a field is not found, use an empty string or 0.';
 
   // If OPENAI_API_KEY is set, use GPT-4o Vision for real extraction
   if (process.env.OPENAI_API_KEY) {
@@ -20,7 +24,7 @@ export async function POST(request) {
               content: [
                 {
                   type: "text",
-                  text: 'Extract invoice data from this image. Return ONLY a JSON object with these keys: company (string), amount (number, no currency symbols), date (YYYY-MM-DD), invoiceNumber (string). If a field is not found, use an empty string or 0.',
+                  text: prompt,
                 },
                 {
                   type: "image_url",
@@ -45,6 +49,9 @@ export async function POST(request) {
   }
 
   // Fallback: return blanks so the user can fill in manually
+  if (isReceipt) {
+    return NextResponse.json({ vendor: "", amount: 0, date: "" });
+  }
   return NextResponse.json({
     company: "",
     amount: 0,

@@ -45,6 +45,7 @@ import {
   Receipt,
   Users,
   Palette,
+  History,
 } from "lucide-react";
 import { Card, Button, Input } from "./components/ui";
 import CalendarTab from "./components/CalendarTab";
@@ -216,6 +217,8 @@ export default function App() {
   const [customFolderInput, setCustomFolderInput] = useState("");
   const [savedCustomFolderId, setSavedCustomFolderId] = useState("");
   const [relinkPreview, setRelinkPreview] = useState(null); // parsed JSON waiting for confirm
+  const [showSnapshots, setShowSnapshots] = useState(false);
+  const [snapshots, setSnapshots] = useState([]);
   const [markPaidModal, setMarkPaidModal] = useState(null); // { id, idx, amount, existingPayments } | null
   const [markPaidPartialAmt, setMarkPaidPartialAmt] = useState("");
   const [markPaidMode, setMarkPaidMode] = useState(null); // "full" | "partial" | null
@@ -502,6 +505,7 @@ export default function App() {
     const newVehicles = Array.isArray(d.vehicles) ? d.vehicles : vehicles;
     const newGasLogs = Array.isArray(d.gasLogs) ? d.gasLogs : gasLogs;
     const newKitPackages = Array.isArray(d.kitPackages) ? d.kitPackages : kitPackages;
+    const newClients = Array.isArray(d.clients) ? d.clients : clients;
     setInvoices(newInvoices);
     setTimecards(newTimecards);
     setJobs(newJobs);
@@ -512,16 +516,64 @@ export default function App() {
     setVehicles(newVehicles);
     setGasLogs(newGasLogs);
     setKitPackages(newKitPackages);
+    setClients(newClients);
     // Write directly to localStorage so data persists immediately
     try {
       localStorage.setItem("hibp_data", JSON.stringify({
         invoices: newInvoices, timecards: newTimecards, jobs: newJobs, purchases: newPurchases,
         classifications: newClassifications, mileageLogs: newMileageLogs,
         vehicleExpenses: newVehicleExpenses, vehicles: newVehicles, gasLogs: newGasLogs, kitPackages: newKitPackages,
+        clients: newClients,
       }));
     } catch {}
     setRelinkPreview(null);
   };
+
+  // ── SNAPSHOTS (dated local saves with rollback) ──────────────────────────────
+  const snapshotData = () => ({ invoices, timecards, jobs, purchases, classifications, mileageLogs, vehicleExpenses, vehicles, gasLogs, kitPackages, clients });
+
+  const loadSnapshots = async () => {
+    try {
+      const res = await fetch("/api/snapshots");
+      const json = await res.json();
+      const list = json.snapshots || [];
+      setSnapshots(list);
+      return list;
+    } catch { return []; }
+  };
+
+  const saveSnapshot = async (reason = "manual") => {
+    const res = await fetch("/api/snapshots", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data: snapshotData(), reason }),
+    });
+    if (!res.ok) throw new Error("Snapshot save failed");
+    await loadSnapshots();
+  };
+
+  const restoreSnapshot = async (id) => {
+    try {
+      await saveSnapshot("manual"); // keep the current state so the restore can be undone
+      const res = await fetch(`/api/snapshots?id=${encodeURIComponent(id)}`);
+      if (!res.ok) throw new Error("Not found");
+      const json = await res.json();
+      setShowSnapshots(false);
+      setRelinkPreview(json.data);
+    } catch { alert("Could not load that snapshot."); }
+  };
+
+  // One automatic snapshot per day, once data has loaded
+  useEffect(() => {
+    if (!hydrated || isEmptyDataSnapshot(snapshotData())) return;
+    (async () => {
+      const list = await loadSnapshots();
+      const today = new Date().toISOString().slice(0, 10);
+      if (!list.some(s => s.reason === "auto" && (s.createdAt || "").startsWith(today))) {
+        saveSnapshot("auto").catch(() => {});
+      }
+    })();
+  }, [hydrated]);
 
   // ── SYNC TO DRIVE (manual) ───────────────────────────────────────────────────
   const syncToDrive = async () => {
@@ -2355,6 +2407,32 @@ ${printStyle}</style></head><body>
       ...p,
       receipt: { fileId: driveFileId, fileName: file.name, fileType: file.type },
     } : p));
+
+    // Auto-fill empty purchase fields from the receipt image (no-op without OPENAI_API_KEY)
+    if (file.type.startsWith("image/")) {
+      try {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        const res = await fetch("/api/extract", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image: dataUrl, mode: "receipt" }),
+        });
+        if (res.ok) {
+          const fields = await res.json();
+          setPurchases(prev => prev.map(p => p.id === purchaseId ? {
+            ...p,
+            vendor: p.vendor || fields.vendor || "",
+            date: p.date || fields.date || "",
+            amount: p.amount || parseFloat(fields.amount) || p.amount,
+          } : p));
+        }
+      } catch (err) { console.warn("Receipt auto-fill failed:", err); }
+    }
   };
 
   // Preview blob or Drive
@@ -2388,6 +2466,39 @@ ${printStyle}</style></head><body>
             <div className="px-6 pb-5 flex justify-end gap-2">
               <Button variant="outline" onClick={() => setRelinkPreview(null)}>Cancel</Button>
               <Button onClick={confirmRelink}>Restore</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Snapshots Modal ── */}
+      {showSnapshots && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={() => setShowSnapshots(false)}>
+          <div className="bg-white dark:bg-slate-800 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-700">
+              <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">Snapshots</h2>
+              <button onClick={() => setShowSnapshots(false)} className="text-slate-400 hover:text-slate-600"><X size={18} /></button>
+            </div>
+            <div className="px-6 py-4 space-y-3">
+              <p className="text-xs text-slate-500">The last 30 snapshots are kept. One is saved automatically each day. Restoring first saves your current data, so you can undo it.</p>
+              <Button onClick={() => saveSnapshot("manual").catch(() => alert("Could not save snapshot."))} variant="outline" className="text-xs h-8 gap-1.5 w-full">
+                <History size={13} /> Save snapshot now
+              </Button>
+              {snapshots.length === 0 ? (
+                <p className="text-xs text-slate-400 italic text-center py-4">No snapshots yet.</p>
+              ) : (
+                <ul className="max-h-80 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-700">
+                  {snapshots.map(s => (
+                    <li key={s.id} className="flex items-center justify-between gap-3 py-2 text-sm">
+                      <div>
+                        <p className="text-slate-700 dark:text-slate-200">{new Date(s.createdAt).toLocaleString()}</p>
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">{s.reason}</p>
+                      </div>
+                      <Button onClick={() => restoreSnapshot(s.id)} variant="outline" className="text-xs h-7">Restore</Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </div>
         </div>
@@ -3744,6 +3855,9 @@ ${printStyle}</style></head><body>
                 </Button>
               </div>
             )}
+                <Button onClick={() => { loadSnapshots(); setShowSnapshots(true); }} variant="ghost" className="text-xs h-8 gap-1.5" title="Dated snapshots you can roll back to">
+                  <History size={13} /> Snapshots
+                </Button>
             {/* Dark / Light mode toggle */}
             <button
               onClick={toggleDarkMode}
@@ -4104,6 +4218,7 @@ ${printStyle}</style></head><body>
             allYears={allYears}
             setSelectedYear={setSelectedYear}
             invoices={invoices}
+            clients={clients}
             purchases={purchases}
             mileageLogs={mileageLogs}
             timecards={timecards}

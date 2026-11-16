@@ -391,6 +391,11 @@ export function downloadCSV(rows, filename) {
 export const TAX_RATE = 0.25;
 export const IRS_MILEAGE_RATE = 0.70;
 
+// Form 1099-NEC/MISC filing threshold: $600 before 2026, $2,000 for 2026 payments (per 2025 law change).
+export function form1099Threshold(year) {
+  return Number(year) >= 2026 ? 2000 : 600;
+}
+
 export const MACRS_TABLES = {
   "3yr":  [33.33, 44.45, 14.81, 7.41],
   "5yr":  [20.00, 32.00, 19.20, 11.52, 11.52, 5.76],
